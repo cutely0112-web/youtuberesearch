@@ -55,17 +55,25 @@ def build_subtitle_opts(embed_into_video: bool):
         return { "writesubtitles": True, "writeautomaticsub": True, "subtitlesformat": "best", "postprocessors": [{"key": "FFmpegEmbedSubtitle"}] }
     return { "writesubtitles": True, "writeautomaticsub": True, "skip_download": True, "subtitlesformat": "vtt" }
 
+# yt-dlp 내부 로거 오류 방지용 클래스
+class YdlLogger:
+    def debug(self, msg): pass
+    def warning(self, msg): pass
+    def error(self, msg): print(f"[YT-DLP ERROR] {msg}")
+
 def make_ydl_opts_base(save_dir: Path):
     return {
         "outtmpl": str(save_dir / "%(id)s.%(ext)s"),
-        "quiet": False,
-        "verbose": True,
+        "quiet": True,
+        "no_warnings": True,
+        "verbose": False,
         "noprogress": False,
-        "ignoreerrors": False, # 에러 발생 시 None 반환 방지
+        "ignoreerrors": False,
         "nocheckcertificate": True,
+        "logger": YdlLogger(),  # 명시적인 로거 추가로 NoneType 오류 방지
         "concurrent_fragment_downloads": 3,
         "format": "bv*+ba/b",
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
         "referer": "https://www.google.com/",
     }
 
