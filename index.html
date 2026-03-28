@@ -505,6 +505,15 @@
               contributionValue: subs > 0 ? (views / subs) * 100 : 0
             };
           }).filter(r => r.viewCount >= minViews);
+          
+          // 영상 영상 길이 필터링 (롱폼/숏폼)
+          const lengthType = channelFilters.lengthType;
+          if (lengthType === "shorts") {
+            rowsMapped = rowsMapped.filter(r => r.durationSec <= 60);
+          } else if (lengthType === "long") {
+            rowsMapped = rowsMapped.filter(r => r.durationSec > 60);
+          }
+
           if (channelFilters.sort === "popular") rowsMapped.sort((a,b) => b.viewCount - a.viewCount);
           else rowsMapped.sort((a,b) => new Date(b.publishedAt) - new Date(a.publishedAt));
           setRowsByTab(prev => ({ ...prev, channel: rowsMapped }));
@@ -532,10 +541,19 @@
             const cres = await ytChannels(chIds.slice(i, i+50));
             (cres.items || []).forEach(c => chMap.set(c.id, c));
           }
-          const mapped = items.map(it => {
+          let mapped = items.map(it => {
             const ch = chMap.get(it.channelId);
             return { ...it, subscriberCount: Number(ch?.statistics?.subscriberCount || 0), channelPublishedAt: ch?.snippet?.publishedAt || "" };
           });
+
+          // 영상 영상 길이 필터링 (롱폼/숏폼)
+          const trendLengthType = trendFilters.lengthType;
+          if (trendLengthType === "shorts") {
+            mapped = mapped.filter(it => it.durationSec <= 60);
+          } else if (trendLengthType === "long") {
+            mapped = mapped.filter(it => it.durationSec > 60);
+          }
+
           setRowsByTab(prev => ({ ...prev, trending: mapped }));
         } catch (e) { setError(e.message); }
         finally { setLoading(false); }
