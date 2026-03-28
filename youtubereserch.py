@@ -17,11 +17,6 @@ from flask_cors import CORS
 import yt_dlp
 import subprocess
 
-try:
-    from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
-except ImportError:
-    YouTubeTranscriptApi = None
-
 # 2. Flask 앱 초기화
 app = Flask(__name__)
 CORS(app)
@@ -262,70 +257,21 @@ def api_transcript():
     if not video_id:
         return jsonify({"error": "유효하지 않은 YouTube 주소 또는 영상 ID입니다."}), 400
 
-    if YouTubeTranscriptApi is None:
-        return jsonify({"error": "자막 추출 라이브러리(youtube_transcript_api)가 설치되지 않았습니다."}), 500
-
     try:
-        # 버전 및 라이브러리 상태에 따라 메서드 이름이 다를 수 있으므로 체크
-        if hasattr(YouTubeTranscriptApi, 'list_transcripts'):
-            # 1. 자막 목록을 가져와서 적합한 언어 선택 (권장 방식)
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            transcript = transcript_list.find_transcript(['ko', 'en'])
-            transcript_data = transcript.fetch()
-        elif hasattr(YouTubeTranscriptApi, 'get_transcript'):
-            # 2. 직접 get_transcript 호출 (구버전 방식)
-            transcript_data = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko', 'en'])
+        # --- yt-dlp 단독 엔진 사용 ---
+        print(f"[Transcript] yt-dlp 엔진으로 자막 추출 시도 중... ({video_id})", flush=True)
+        lines = extract_transcript_with_ytdlp(video_id)
+        
+        if lines:
+            print(f"[Transcript] 자막 추출 성공: {len(lines)} 라인", flush=True)
+            return jsonify({"lines": lines})
         else:
-            # 3. 최후의 수단으로 모듈 자체에서 찾아보기
-            import youtube_transcript_api
-            if hasattr(youtube_transcript_api, 'YouTubeTranscriptApi'):
-                api_class = youtube_transcript_api.YouTubeTranscriptApi
-                if hasattr(api_class, 'list_transcripts'):
-                    transcript_list = api_class.list_transcripts(video_id)
-                    transcript = transcript_list.find_transcript(['ko', 'en'])
-                    transcript_data = transcript.fetch()
-                else:
-                    transcript_data = api_class.get_transcript(video_id, languages=['ko', 'en'])
-            else:
-                raise AttributeError("YouTubeTranscriptApi 클래스 또는 메서드를 찾을 수 없습니다.")
-        
-        # 데이터는 딕셔너리 리스트이므로 snippet['text'] 로 접근
-        lines = [snippet['text'].strip() for snippet in transcript_data if snippet.get('text', '').strip()]
-        
-        if not lines:
-             raise NoTranscriptFound("자막 내용이 비어 있습니다.")
-
-        return jsonify({"lines": lines})
-
-    except NoTranscriptFound:
-        try:
-            # 한국어 자막이 없을 경우 자동 번역 시도
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            for transcript in transcript_list:
-                if transcript.is_translatable:
-                    translated_transcript = transcript.translate('ko').fetch()
-                    lines = [snippet['text'].strip() for snippet in translated_transcript if snippet.get('text', '').strip()]
-                    return jsonify({"lines": lines})
-            
-            return jsonify({"error": "이 영상에는 한국어로 보거나 번역할 수 있는 자막이 없습니다."}), 404
-        except Exception:
-            return jsonify({"error": "이 영상에는 자막이 없습니다."}), 404
-            
-    except TranscriptsDisabled:
-        return jsonify({"error": "이 영상은 자막 기능이 비활성화되어 있습니다."}), 403
+            print(f"[Transcript] 자막을 찾을 수 없음: {video_id}", flush=True)
+            return jsonify({"error": "이 영상에는 추출 가능한 자막(한국어/영어/자동 생성)이 없습니다."}), 404
 
     except Exception as e:
-        # --- 최종 단계: 모든 라이브러리 방식 실패 시 yt-dlp 기반 백업 로직 실행 ---
-        print(f"[Transcript] 기존 라이브러리 방식 실패 ({video_id}), yt-dlp 백업 모드 실행...")
-        try:
-            backup_lines = extract_transcript_with_ytdlp(video_id)
-            if backup_lines:
-                return jsonify({"lines": backup_lines})
-        except Exception as eb:
-            print(f"[Transcript] 백업 모드조차 실패: {eb}")
-
         app.logger.error(f"자막 처리 최종 실패 ({video_id}): {traceback.format_exc()}")
-        return jsonify({"error": f"자막을 가져오지 못했습니다: 자막 처리 중 예상치 못한 오류 발생: {e}"}), 500
+        return jsonify({"error": f"자막 처리 중 예상치 못한 오류 발생: {e}"}), 500
 
 
 # --- 6. MP4 to MP3 변환 기능 ---
