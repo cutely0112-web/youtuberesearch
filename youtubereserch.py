@@ -43,19 +43,21 @@ DEFAULT_DOWNLOAD_DIR = BASE_DIR / "downloads"
 DEFAULT_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # 디버그용으로 한 번 찍어보면 좋음
-print("========================================")
-print("[TubeResearch] 서버 시작 업데이트 버전 v1.0.3 (Docker)")
-print(f"[TubeResearch] BASE_DIR = {BASE_DIR}")
-print(f"[TubeResearch] DOWNLOAD_DIR = {DEFAULT_DOWNLOAD_DIR}")
+print("========================================", flush=True)
+print("[TubeResearch] 서버 시작 업데이트 버전 v1.0.4 (Docker)", flush=True)
+print(f"[TubeResearch] BASE_DIR = {BASE_DIR}", flush=True)
+print(f"[TubeResearch] DOWNLOAD_DIR = {DEFAULT_DOWNLOAD_DIR}", flush=True)
 
 # 서버 시작 시 쿠키 파일 존재 여부 미리 확인 (사용자 피드백용)
 cookie_path = BASE_DIR / "cookies.txt"
 if cookie_path.exists():
-    print(f"[TubeResearch] 쿠키 파일(cookies.txt) 감지됨: 준비 완료")
+    print(f"[TubeResearch] 쿠키 파일(cookies.txt) 감지됨: 준비 완료 (크기: {os.path.getsize(cookie_path)} bytes)", flush=True)
 else:
-    print(f"[TubeResearch] 쿠키 파일(cookies.txt) 없음: 브라우저 자동 연동 모드")
+    print(f"[TubeResearch] 쿠키 파일(cookies.txt) 없음: 브라우저 자동 연동 모드", flush=True)
+    # 현재 폴더 파일 목록 출력 (디버깅용)
+    print(f"[TubeResearch] 현재 폴더 파일 목록: {os.listdir(str(BASE_DIR))}", flush=True)
 
-print("========================================")
+print("========================================", flush=True)
 
 # --- 4. 영상 다운로드 기능 (정상 동작하므로 변경 없음) ---
 
