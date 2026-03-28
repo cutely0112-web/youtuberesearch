@@ -47,6 +47,14 @@ print("========================================")
 print("[TubeResearch] 서버 시작 업데이트 버전 v1.0.3 (Docker)")
 print(f"[TubeResearch] BASE_DIR = {BASE_DIR}")
 print(f"[TubeResearch] DOWNLOAD_DIR = {DEFAULT_DOWNLOAD_DIR}")
+
+# 서버 시작 시 쿠키 파일 존재 여부 미리 확인 (사용자 피드백용)
+cookie_path = BASE_DIR / "cookies.txt"
+if cookie_path.exists():
+    print(f"[TubeResearch] 쿠키 파일(cookies.txt) 감지됨: 준비 완료")
+else:
+    print(f"[TubeResearch] 쿠키 파일(cookies.txt) 없음: 브라우저 자동 연동 모드")
+
 print("========================================")
 
 # --- 4. 영상 다운로드 기능 (정상 동작하므로 변경 없음) ---
@@ -67,7 +75,7 @@ class YdlLogger:
         return lambda *args, **kwargs: None
 
 def make_ydl_opts_base(save_dir: Path):
-    return {
+    opts = {
         "outtmpl": str(save_dir / "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
@@ -82,7 +90,32 @@ def make_ydl_opts_base(save_dir: Path):
         "format": "best[ext=mp4]/best",
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
         "referer": "https://www.google.com/",
+        # 유튜브 봇 감지 우회 옵션 강화
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "web", "mweb"],
+                "player_skip_subscribe_check": True,
+            }
+        },
     }
+    
+    # 1순위: cookies.txt 파일이 프로젝트 루트에 있으면 최우선 적용 (서버/로컬 공통)
+    cookie_path = BASE_DIR / "cookies.txt"
+    if cookie_path.exists():
+        opts["cookiefile"] = str(cookie_path)
+        print(f"[TubeResearch] 쿠키 파일 발견 및 적용됨: {cookie_path}")
+    else:
+        # 2순위: 로컬 환경(Render가 아닌 경우)에서 크롬 쿠키 자동 추출 시도
+        is_on_render = os.environ.get("RENDER") is not None
+        if not is_on_render:
+            try:
+                # 크롬 브라우저에서 실시간으로 쿠키 추출 시도
+                opts["cookiesfrombrowser"] = ('chrome', )
+                print("[TubeResearch] 로컬 환경 감지: 크롬 브라우저 쿠키 자동 연동 시도")
+            except Exception as e:
+                print(f"[TubeResearch] 크롬 쿠키 추출 실패 (크롬이 켜져있으면 실패할 수 있음): {e}")
+        
+    return opts
 
 @app.route("/download", methods=["POST"])
 def api_download_stream():
