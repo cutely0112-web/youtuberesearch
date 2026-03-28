@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Tube Research - AI 기반 유튜브 분석 툴</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+    }
+
+    .line-clamp-2 {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      line-clamp: 2;
+    }
+
+    .scrollbar-thin::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .scrollbar-thin::-webkit-scrollbar-track {
+      background: #e5e7eb;
+    }
+
+    .scrollbar-thin::-webkit-scrollbar-thumb {
+      background: #9ca3af;
+      border-radius: 9999px;
+    }
+  </style>
+</head>
+
+<body class="bg-slate-50">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useMemo, useEffect } = React;
+
+    /* ---------------- (이 부분은 기존과 동일하여 생략) ---------------- */
+    const COUNTRY_CODES = { 한국: "KR", 일본: "JP", 미국: "US", 대만: "TW", 영국: "GB", 캐나다: "CA", 호주: "AU", 독일: "DE", 프랑스: "FR", 스페인: "ES", 브라질: "BR", 인도: "IN", 러시아: "RU", };
+    const LANGUAGE_MAP = { KR: "ko", JP: "ja", US: "en", GB: "en", CA: "en", AU: "en", TW: "zh-Hant", DE: "de", FR: "fr", ES: "es", BR: "pt", IN: "en", RU: "ru", };
+    const shortNumber = (n) => { const x = Number(n || 0); if (!x) return "-"; if (x >= 1_000_000_000) return (x / 1_000_000_000).toFixed(1) + "B"; if (x >= 1_000_000) return (x / 1_000_000).toFixed(1) + "M"; if (x >= 1_000) return (x / 1_000).toFixed(1) + "K"; return String(x); };
+    const bestThumb = (t) => t?.maxres?.url || t?.standard?.url || t?.high?.url || t?.medium?.url || t?.default?.url || "";
+    const daysAgoISO = (d) => new Date(Date.now() - d * 86400000).toISOString();
+    function parseISODurationToSeconds(iso) { if (!iso || typeof iso !== "string" || !iso.startsWith("PT")) return 0; let h = 0, m = 0, s = 0, num = ""; for (let i = 2; i < iso.length; i++) { const ch = iso[i]; if (ch >= "0" && ch <= "9") { num += ch; continue; } if (ch === "H") { h = parseInt(num || "0", 10); num = ""; } else if (ch === "M") { m = parseInt(num || "0", 10); num = ""; } else if (ch === "S") { s = parseInt(num || "0", 10); num = ""; } } return h * 3600 + m * 60 + s; }
+    const loadKeys = () => { try { return JSON.parse(localStorage.getItem("yt_api_keys") || "[]"); } catch { return []; } };
+    const saveKeysToStorage = (text) => { const arr = text.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean); localStorage.setItem("yt_api_keys", JSON.stringify(arr)); return arr.length; };
+    let keyIndex = -1;
+    const loadGeminiKeys = () => { try { return JSON.parse(localStorage.getItem("gemini_api_keys") || "[]"); } catch { return []; } };
+    const saveGeminiKeysToStorage = (text) => { const arr = text.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean); localStorage.setItem("gemini_api_keys", JSON.stringify(arr)); return arr.length; };
+    let geminiKeyIndex = -1;
+    async function fetchYT(base, params) { const keys = loadKeys(); if (!keys.length) throw new Error("API 키를 먼저 저장하세요."); const tries = Math.max(3, keys.length); const start = (keyIndex + 1 + keys.length) % keys.length; let last = ""; for (let i = 0; i < tries; i++) { const k = keys[(start + i) % keys.length]; const url = new URL(base); Object.entries(params || {}).forEach(([p, v]) => { if (v !== undefined && v !== null && v !== "") { url.searchParams.set(p, String(v)); } }); url.searchParams.set("key", k); try { const r = await fetch(url); if (r.ok) { keyIndex = (start + i) % keys.length; return r.json(); } last = await r.text(); } catch (e) { last = e?.message || String(e); } await new Promise((r) => setTimeout(r, 150 * (i + 1))); } throw new Error("YT_FAILED: " + String(last).slice(0, 200)); }
+    async function ytSearch(opts) { return fetchYT("https://www.googleapis.com/youtube/v3/search", { part: "snippet", ...opts, }); }
+    async function ytVideos(ids) { if (!ids?.length) return { items: [] }; return fetchYT("https://www.googleapis.com/youtube/v3/videos", { part: "snippet,contentDetails,statistics,status", id: ids.join(","), }); }
+    async function ytChannels(ids) { if (!ids?.length) return { items: [] }; return fetchYT("https://www.googleapis.com/youtube/v3/channels", { part: "snippet,statistics,contentDetails", id: ids.join(","), }); }
+    async function ytMostPopular({ regionCode, maxResults = 50 }) { return fetchYT("https://www.googleapis.com/youtube/v3/videos", { part: "snippet,contentDetails,statistics,status", chart: "mostPopular", regionCode, maxResults, }); }
+    function parseChannelInput(str) { if (!str) return { channelId: "", handle: "" }; try { const u = new URL(str); const parts = u.pathname.split("/").filter(Boolean); const idx = parts.indexOf("channel"); if (idx >= 0 && parts[idx + 1]) { return { channelId: parts[idx + 1], handle: "" }; } const at = parts.find((p) => p.startsWith("@")); if (at) return { channelId: "", handle: at.replace("@", "") }; } catch (e) { if (str.startsWith("UC")) return { channelId: str, handle: "" }; } if (str.startsWith("@")) return { channelId: "", handle: str.slice(1) }; return { channelId: "", handle: str }; }
+    async function resolveChannelByHandle(handle) { try { const res = await fetchYT("https://www.googleapis.com/youtube/v3/channels", { part: "id", forHandle: handle }); if (res.items?.length) return res.items[0].id; } catch (e) { } const res2 = await ytSearch({ q: handle, type: "channel", maxResults: 1, }); return res2.items?.[0]?.snippet?.channelId || ""; }
+    async function fetchChannelVideosAll(channelId) { const ch = await ytChannels([channelId]); const chInfo = ch.items?.[0]; if (!chInfo) throw new Error("채널 정보를 가져오지 못했습니다."); const uploads = chInfo.contentDetails?.relatedPlaylists?.uploads; let videos = []; if (uploads) { let token = ""; while (true) { const r = await fetchYT("https://www.googleapis.com/youtube/v3/playlistItems", { part: "snippet,contentDetails", playlistId: uploads, maxResults: 50, pageToken: token || undefined, }); (r.items || []).forEach((it) => { videos.push({ videoId: it.contentDetails?.videoId, title: it.snippet?.title, publishedAt: it.contentDetails?.videoPublishedAt || it.snippet?.publishedAt, thumbnail: it.snippet?.thumbnails?.medium?.url || it.snippet?.thumbnails?.default?.url || "", description: it.snippet?.description || "", }); }); if (!r.nextPageToken) break; token = r.nextPageToken; } } else { let token = ""; while (true) { const sres = await ytSearch({ channelId, part: "snippet", order: "date", type: "video", maxResults: 50, pageToken: token || undefined, }); (sres.items || []).forEach((it) => { if (it.id?.videoId) { videos.push({ videoId: it.id.videoId, title: it.snippet?.title, publishedAt: it.snippet?.publishedAt, thumbnail: it.snippet?.thumbnails?.medium?.url || it.snippet?.thumbnails?.default?.url || "", description: it.snippet?.description || "", }); } }); if (!sres.nextPageToken) break; token = sres.nextPageToken; } } const withStats = []; for (let i = 0; i < videos.length; i += 50) { const part = videos.slice(i, i + 50); const ids = part.map((v) => v.videoId); const st = await ytVideos(ids); const stMap = {}; (st.items || []).forEach((v) => { stMap[v.id] = { statistics: v.statistics, durationSec: parseISODurationToSeconds(v.contentDetails?.duration || ""), description: v.snippet?.description || "", license: v.status?.license || "", }; }); part.forEach((v) => { const extra = stMap[v.videoId] || { statistics: {}, durationSec: 0, description: v.description || "", license: "", }; withStats.push({ ...v, statistics: extra.statistics || {}, durationSec: extra.durationSec || 0, description: extra.description || v.description || "", license: extra.license || "", }); }); } return { channelInfo: chInfo, videos: withStats }; }
+    async function fetchCaptions(videoId) { try { const res = await fetch("/transcript?video=" + encodeURIComponent(videoId)); const data = await res.json(); if (!res.ok) { return "자막을 가져오지 못했습니다: " + (data.error || res.statusText); } if (!data.lines || !data.lines.length) { return "이 영상에서는 자막을 찾지 못했습니다."; } return data.lines.join("\n"); } catch (e) { return "자막 로딩 중 오류: " + (e.message || e); } }
+    async function fetchVideoComments(videoId, maxResults = 10) { const data = await fetchYT("https://www.googleapis.com/youtube/v3/commentThreads", { part: "snippet", videoId, maxResults, }); return (data.items || []).map((it) => { const top = it.snippet.topLevelComment.snippet; return { author: top.authorDisplayName, text: top.textDisplay, publishedAt: top.publishedAt, likeCount: top.likeCount, }; }); }
+    async function fetchImageAsBase64(url) { try { const res = await fetch(url); const blob = await res.blob(); const dataUrl = await new Promise((resolve, reject) => { const fr = new FileReader(); fr.onload = () => resolve(fr.result); fr.onerror = reject; fr.readAsDataURL(blob); }); const m = String(dataUrl).match(/^data:(image\/(png|jpeg|jpg));base64,(.+)$/); if (!m) return null; const meta = m[1]; const ext = meta.indexOf("png") > -1 ? "png" : "jpeg"; return { base64: "data:" + meta + ";base64," + m[3], ext }; } catch { return null; } }
+    async function callGeminiAPI(prompt, contentText) { const keys = loadGeminiKeys(); if (!keys.length) { throw new Error("Gemini API 키가 없습니다. 먼저 저장하세요."); } const maxLen = 12000; const textToSend = contentText.length > maxLen ? contentText.slice(0, maxLen) + "\n\n...(이하 생략됨)" : contentText; const mergedText = `${prompt}\n\n${textToSend}`; const tries = Math.max(3, keys.length); const start = (geminiKeyIndex + 1 + keys.length) % keys.length; let lastErr = ""; for (let i = 0; i < tries; i++) { const k = keys[(start + i) % keys.length]; const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + encodeURIComponent(k); const body = { contents: [{ role: "user", parts: [{ text: mergedText, },], },], }; try { const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), }); const data = await res.json(); if (res.ok && data?.candidates?.[0]?.content?.parts?.length) { geminiKeyIndex = (start + i) % keys.length; return data.candidates[0].content.parts.map((p) => p.text).join("\n"); } else { lastErr = data?.error?.message || JSON.stringify(data).slice(0, 200); } } catch (e) { lastErr = e?.message || String(e); } } throw new Error("Gemini 호출 실패: " + lastErr); }
+
+    /* ---------------- 메인 컴포넌트 ---------------- */
+    function App() {
+      const [showApiModal, setShowApiModal] = useState(false);
+      const [apiTextarea, setApiTextarea] = useState(loadKeys().join("\n"));
+      const [showGeminiModal, setShowGeminiModal] = useState(false);
+      const [geminiTextarea, setGeminiTextarea] = useState(loadGeminiKeys().join("\n"));
+      const [tab, setTab] = useState("video");
+      const [country, setCountry] = useState("KR");
+      const [downloadMode, setDownloadMode] = useState("both");
+      const [downloadUrls, setDownloadUrls] = useState("");
+      const [downloadLogs, setDownloadLogs] = useState([]);
+      const [downloadLoading, setDownloadLoading] = useState(false);
+      const [q, setQ] = useState("");
+      const [videoFilters, setVideoFilters] = useState({ window: "any", channelWindow: "any", lengthType: "any", viewMin: "0", subMin: "0", collect: 50, sort: "relevance", license: "any", });
+      const [channelSearchFilters, setChannelSearchFilters] = useState({ keyword: "", channelWindow: "any", subMin: "0", collect: 50, });
+      const [channelQ, setChannelQ] = useState("");
+      const [channelFilters, setChannelFilters] = useState({ sort: "date", minViews: "0", lengthType: "any", });
+      const [trendCountry, setTrendCountry] = useState("KR");
+      const [trendFilters, setTrendFilters] = useState({ lengthType: "any" });
+      const [rowsByTab, setRowsByTab] = useState({ video: [], "channel-search": [], channel: [], trending: [] });
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState("");
+      const [showCaptionModal, setShowCaptionModal] = useState(false);
+      const [captionContent, setCaptionContent] = useState("");
+      const [captionLoading, setCaptionLoading] = useState(false);
+      const [captionAnalysis, setCaptionAnalysis] = useState("");
+      const [captionAnalysisLoading, setCaptionAnalysisLoading] = useState(false);
+      const [showCommentModal, setShowCommentModal] = useState(false);
+      const [commentVideoTitle, setCommentVideoTitle] = useState("");
+      const [commentItems, setCommentItems] = useState([]);
+      const [commentLoading, setCommentLoading] = useState(false);
+      const [commentCountSel, setCommentCountSel] = useState(10);
+      const [commentTargetVideoId, setCommentTargetVideoId] = useState("");
+      const [commentAnalysis, setCommentAnalysis] = useState("");
+      const [commentAnalysisLoading, setCommentAnalysisLoading] = useState(false);
+      const [showDescModal, setShowDescModal] = useState(false);
+      const [descContent, setDescContent] = useState("");
+      const [descTitle, setDescTitle] = useState("");
+      const [speechText, setSpeechText] = useState("");
+      const [speechSpeed, setSpeechSpeed] = useState(100);
+      const BASE_SPEECH_CHARS = 330;
+      const BASE_SPEECH_SECONDS = 46;
+      const SEC_PER_CHAR_100 = BASE_SPEECH_SECONDS / BASE_SPEECH_CHARS;
+      const calcSpeechSeconds = (text, speedPercent) => { const charCount = text.length; const seconds = charCount * SEC_PER_CHAR_100 * (100 / (speedPercent || 100)); return Math.round(seconds); };
+      const [sortKey, setSortKey] = useState(null);
+      const [sortDir, setSortDir] = useState("desc");
+      const rows = rowsByTab[tab] || [];
+      const sortedRows = useMemo(() => { const arr = [...rows]; if (!sortKey) return arr; const dir = sortDir === "asc" ? 1 : -1; arr.sort((a, b) => { const va = a[sortKey] ?? ""; const vb = b[sortKey] ?? ""; const na = Number(va); const nb = Number(vb); if (!Number.isNaN(na) && !Number.isNaN(nb)) { return (na - nb) * dir; } return String(va).localeCompare(String(vb)) * dir; }); return arr; }, [rows, sortKey, sortDir]);
+      const handleHeaderSort = (key) => { setSortKey((prevKey) => { if (prevKey === key) { setSortDir((prevDir) => (prevDir === "asc" ? "desc" : "asc")); return prevKey; } else { setSortDir("desc"); return key; } }); };
+      const renderSortArrow = (key) => { if (sortKey !== key) return ""; return sortDir === "asc" ? " ▲" : " ▼"; };
+      const [selectedRows, setSelectedRows] = useState(new Set());
+      const [showSavedModal, setShowSavedModal] = useState(false);
+      const [savedModalType, setSavedModalType] = useState("channel");
+      const [savedModalRefresh, setSavedModalRefresh] = useState(0);
+      const [channelMenuOpen, setChannelMenuOpen] = useState(null);
+      const [selectedFolderId, setSelectedFolderId] = useState("all");
+      const [showFolderSelectModal, setShowFolderSelectModal] = useState(false);
+      const [targetItemsToSave, setTargetItemsToSave] = useState([]);
+      const [targetSaveType, setTargetSaveType] = useState("video");
+      const [selectedSavedRows, setSelectedSavedRows] = useState(new Set());
+      const [showCoffeeModal, setShowCoffeeModal] = useState(false);
+
+      const handleCopyChannelUrl = (channelId) => { const url = `https://www.youtube.com/channel/${channelId}`; navigator.clipboard.writeText(url).then(() => { alert("채널 주소가 복사되었습니다."); setChannelMenuOpen(null); }); };
+      const handleOpenChannel = (channelId) => { window.open(`https://www.youtube.com/channel/${channelId}`, "_blank"); setChannelMenuOpen(null); };
+      const loadSavedChannels = () => { try { return JSON.parse(localStorage.getItem("saved_channels") || "[]"); } catch { return []; } };
+      const loadSavedVideos = () => { try { return JSON.parse(localStorage.getItem("saved_videos") || "[]"); } catch { return []; } };
+      const loadSavedFolders = () => { try { return JSON.parse(localStorage.getItem("saved_folders") || "[]"); } catch { return []; } };
+      const saveChannels = (channels) => { localStorage.setItem("saved_channels", JSON.stringify(channels)); };
+      const saveVideos = (videos) => { localStorage.setItem("saved_videos", JSON.stringify(videos)); };
+      const saveFolders = (folders) => { localStorage.setItem("saved_folders", JSON.stringify(folders)); };
+      const [convertFile, setConvertFile] = useState(null);
+      const [convertLoading, setConvertLoading] = useState(false);
+      const [convertError, setConvertError] = useState("");
+      useEffect(() => { setQ(""); setVideoFilters({ window: "any", channelWindow: "any", lengthType: "any", viewMin: "0", subMin: "0", collect: 50, sort: "relevance", license: "any" }); setChannelSearchFilters({ keyword: "", channelWindow: "any", subMin: "0", collect: 50 }); setChannelQ(""); setChannelFilters({ sort: "date", minViews: "0", lengthType: "any" }); setRowsByTab({ video: [], "channel-search": [], channel: [], trending: [] }); setSelectedRows(new Set()); setError(""); setLoading(false); setSortKey(null); setSortDir("desc"); setDownloadUrls(""); setDownloadLogs([]); setShowCaptionModal(false); setShowCommentModal(false); setShowDescModal(false); setShowSavedModal(false); }, []); useEffect(() => { setSelectedRows(new Set()); setSelectedSavedRows(new Set()); setError(""); setSortKey(null); setSortDir("desc"); setChannelMenuOpen(null); }, [tab]); useEffect(() => { const handleClickOutside = (e) => { if (channelMenuOpen && !e.target.closest(".relative.inline-block")) { setChannelMenuOpen(null); } }; if (channelMenuOpen) { document.addEventListener("click", handleClickOutside); return () => document.removeEventListener("click", handleClickOutside); } }, [channelMenuOpen]);
+      const handleToggleRow = (rowId) => { setSelectedRows((prev) => { const next = new Set(prev); if (next.has(rowId)) { next.delete(rowId); } else { next.add(rowId); } return next; }); };
+      const handleSelectAll = () => { if (selectedRows.size === sortedRows.length) { setSelectedRows(new Set()); } else { setSelectedRows(new Set(sortedRows.map((r) => r.id || r.channelId))); } };
+      const handleToggleSavedRow = (id) => { setSelectedSavedRows(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; }); };
+      const handleSelectAllSaved = (list) => { if (selectedSavedRows.size === list.length && list.length > 0) setSelectedSavedRows(new Set()); else setSelectedSavedRows(new Set(list.map(item => item.id))); };
+      const handleSaveChannels = () => { const selected = sortedRows.filter((r) => selectedRows.has(r.id || r.channelId)); if (selected.length === 0) { alert("저장할 채널을 선택하세요."); return; } setTargetItemsToSave(selected); setTargetSaveType("channel"); setShowFolderSelectModal(true); };
+      const handleSaveVideos = () => { const selected = sortedRows.filter((r) => selectedRows.has(r.id)); if (selected.length === 0) { alert("저장할 영상을 선택하세요."); return; } setTargetItemsToSave(selected); setTargetSaveType("video"); setShowFolderSelectModal(true); };
+      const performActualSave = (folderId) => { if (targetSaveType === "channel") { const saved = loadSavedChannels(); const newChannels = targetItemsToSave.map((r) => ({ id: r.channelId || r.id, channelTitle: r.channelTitle, subscriberCount: r.subscriberCount || r.channelSubs, channelPublishedAt: r.channelPublishedAt, description: r.description, profileThumb: r.profileThumb || r.thumb || "", savedAt: new Date().toISOString(), folderId: folderId || "all", })); let updatedCount = 0; let newCount = 0; const finalSaved = [...saved]; newChannels.forEach(nc => { const idx = finalSaved.findIndex(s => s.id === nc.id); if (idx > -1) { finalSaved[idx].folderId = folderId || "all"; updatedCount++; } else { finalSaved.push(nc); newCount++; } }); saveChannels(finalSaved); if (newCount > 0) alert(`${newCount}개의 채널이 저장되었습니다.`); else if (updatedCount > 0) alert(`${updatedCount}개의 채널 폴더가 변경되었습니다.`); } else { const saved = loadSavedVideos(); const newVideos = targetItemsToSave.map((r) => ({ id: r.id, title: r.title, channelTitle: r.channelTitle, channelId: r.channelId, viewCount: r.viewCount, durationSec: r.durationSec, commentCount: r.commentCount, publishedAt: r.publishedAt, subscriberCount: r.subscriberCount || r.channelSubs, channelPublishedAt: r.channelPublishedAt, description: r.description, thumb: r.thumb, url: r.url, dailyViews: r.dailyViews, growthPerHour: r.growthPerHour, contributionValue: r.contributionValue, savedAt: new Date().toISOString(), folderId: folderId || "all", })); let updatedCount = 0; let newCount = 0; const finalSaved = [...saved]; newVideos.forEach(nv => { const idx = finalSaved.findIndex(s => s.id === nv.id); if (idx > -1) { finalSaved[idx].folderId = folderId || "all"; updatedCount++; } else { finalSaved.push(nv); newCount++; } }); saveVideos(finalSaved); if (newCount > 0) alert(`${newCount}개의 영상이 저장되었습니다.`); else if (updatedCount > 0) alert(`${updatedCount}개의 영상 폴더가 변경되었습니다.`); } setSelectedRows(new Set()); setSelectedSavedRows(new Set()); setShowFolderSelectModal(false); setSavedModalRefresh((prev) => prev + 1); };
+      const handleDeleteSavedChannel = (id) => { const saved = loadSavedChannels(); saveChannels(saved.filter((c) => c.id !== id)); setSavedModalRefresh((prev) => prev + 1); };
+      const handleDeleteSavedVideo = (id) => { const saved = loadSavedVideos(); saveVideos(saved.filter((v) => v.id !== id)); setSavedModalRefresh((prev) => prev + 1); };
+
+
+      const handleDownload = async () => {
+        const urls = downloadUrls.split('\n').map(u => u.trim()).filter(Boolean);
+        if (urls.length === 0) {
+          alert("다운로드할 URL을 입력하세요.");
+          return;
+        }
+
+        setDownloadLoading(true);
+        const initialLogs = urls.map(url => ({
+          url,
+          status: 'pending',
+          message: '대기 중...',
+          percent: 0,
+        }));
+        setDownloadLogs(initialLogs);
+
+        for (let i = 0; i < urls.length; i++) {
+          const url = urls[i];
+
+          setDownloadLogs(prev => prev.map(log => log.url === url ? { ...log, status: 'progress', message: '서버에 연결 중...' } : log));
+
+          try {
+            const response = await fetch("/download", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ url, mode: downloadMode }),
+            });
+
+            if (!response.ok) {
+              const errData = await response.json();
+              throw new Error(errData.error || `서버 오류: ${response.status}`);
+            }
+            if (!response.body) {
+              throw new Error("스트리밍 응답을 지원하지 않습니다.");
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+
+              const chunk = decoder.decode(value, { stream: true });
+              const lines = chunk.split('\n\n').filter(Boolean);
+              for (const line of lines) {
+                if (line.startsWith('data:')) {
+                  const jsonData = line.substring(5);
+                    try {
+                      const parsedData = JSON.parse(jsonData);
+                      setDownloadLogs(prev => prev.map(log =>
+                        log.url === url ? { ...log, ...parsedData, url } : log
+                      ));
+                      
+                      // 다운로드 성공 시 사용자 PC로 자동 다운로드 트리거
+                      if (parsedData.status === 'ok' && parsedData.filename) {
+                        const downloadUrl = `/download_file/${encodeURIComponent(parsedData.filename)}`;
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = downloadUrl;
+                        document.body.appendChild(a);
+                        a.click();
+                        setTimeout(() => { a.remove(); }, 100);
+                      }
+                    } catch (e) {
+                      console.error("JSON 파싱 오류:", jsonData);
+                    }
+                }
+              }
+            }
+          } catch (e) {
+            setDownloadLogs(prev => prev.map(log =>
+              log.url === url ? { ...log, status: 'error', message: '클라이언트 요청 실패: ' + e.message, percent: 0 } : log
+            ));
+          }
+        }
+
+        setDownloadLoading(false);
+      };
+
+      const handleConvertMP3 = async () => {
+        if (!convertFile) {
+          alert("먼저 변환할 영상 파일을 선택하세요.");
+          return;
+        }
+        setConvertLoading(true);
+        setConvertError("");
+        const formData = new FormData();
+        formData.append('file', convertFile);
+        try {
+          const response = await fetch("/convert", {
+            method: "POST",
+            body: formData,
+          });
+          if (!response.ok) {
+            let errorMsg = "변환 서버 오류가 발생했습니다.";
+            try {
+              const data = await response.json();
+              errorMsg = data.error || errorMsg;
+            } catch (e) {
+              errorMsg = `서버 오류 (${response.status}): 서버가 유효하지 않은 응답을 반환했습니다.`;
+            }
+            throw new Error(errorMsg);
+          }
+          const blob = await response.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = convertFile.name.replace(/\.[^/.]+$/, "") + ".mp3";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          window.URL.revokeObjectURL(url);
+          alert("MP3 변환 및 다운로드가 완료되었습니다.");
+          setConvertFile(null);
+        } catch (e) {
+          setConvertError("변환 실패: " + e.message);
+        } finally {
+          setConvertLoading(false);
+        }
+      };
+
+      const exportExcel = async (activeTab, customData = null) => {
+        try {
+          if (typeof ExcelJS === "undefined") { alert("ExcelJS가 로드되지 않았습니다."); return; }
+          const wb = new ExcelJS.Workbook();
+          const wsName = activeTab === "trending" ? "인기급상승" : activeTab === "video" ? "영상검색" : activeTab === "channel-search" ? "채널검색" : activeTab === "saved-video" ? "저장된영상" : activeTab === "saved-channel" ? "저장된채널" : "채널분석";
+          const ws = wb.addWorksheet(wsName);
+          const rows = customData || rowsByTab[activeTab] || [];
+          const now = Date.now();
+          if (activeTab === "video" || activeTab === "saved-video" || activeTab === "trending") {
+            ws.columns = [
+              { header: "썸네일", key: "thumb", width: 33 }, { header: "제목", key: "title", width: 50 },
+              { header: "채널", key: "channel", width: 20 }, { header: "구독자수", key: "subs", width: 14 },
+              { header: "조회수", key: "views", width: 14 }, { header: "길이(초)", key: "duration", width: 12 },
+              { header: "댓글", key: "comments", width: 12 }, { header: "게시일", key: "pub", width: 13 },
+              { header: "채널개설일", key: "chpub", width: 13 }, { header: "기여도(1일조회수)", key: "daily", width: 20 },
+              { header: "설명", key: "desc", width: 50 }, { header: "영상링크", key: "vlink", width: 25 },
+              { header: "실제영상주소", key: "vurl", width: 40 }, { header: "채널링크", key: "clink", width: 25 },
+              { header: "실제채널주소", key: "curl", width: 40 },
+            ];
+            rows.forEach((r) => {
+              const vUrl = r.url || (r.id ? `https://www.youtube.com/watch?v=${r.id}` : "");
+              const cUrl = r.channelId ? `https://www.youtube.com/channel/${r.channelId}` : "";
+              let dv = r.dailyViews;
+              if (!dv || dv === 0) {
+                const pd = r.publishedAt ? new Date(r.publishedAt).getTime() : now;
+                const d = Math.max(1, Math.floor((now - pd) / 86400000));
+                dv = (r.viewCount || 0) / d;
+              }
+              ws.addRow({
+                thumb: "", title: r.title, channel: r.channelTitle, subs: r.subscriberCount || r.channelSubs,
+                views: r.viewCount, duration: r.durationSec, comments: r.commentCount,
+                pub: (r.publishedAt || "").slice(0, 10), chpub: (r.channelPublishedAt || "").slice(0, 10),
+                daily: Math.round(dv || 0), desc: r.description || "",
+                vlink: vUrl ? { text: "영상보기", hyperlink: vUrl } : "", vurl: vUrl,
+                clink: cUrl ? { text: "채널이동", hyperlink: cUrl } : "", curl: cUrl,
+              });
+            });
+          } else if (activeTab === "channel") {
+            ws.columns = [
+              { header: "썸네일", key: "thumb", width: 33 }, { header: "제목", key: "title", width: 45 },
+              { header: "채널", key: "channel", width: 20 }, { header: "구독자수", key: "subs", width: 14 },
+              { header: "조회수", key: "views", width: 14 }, { header: "댓글수", key: "comments", width: 12 },
+              { header: "업로드일", key: "pub", width: 13 }, { header: "채널개설일", key: "chpub", width: 13 },
+              { header: "기여도(1일조회수)", key: "daily", width: 20 }, { header: "기여도(수치)", key: "contrib", width: 14 },
+              { header: "설명", key: "desc", width: 45 }, { header: "영상링크", key: "vlink", width: 25 },
+              { header: "실제영상주소", key: "vurl", width: 40 }, { header: "채널링크", key: "clink", width: 25 },
+              { header: "실제채널주소", key: "curl", width: 40 },
+            ];
+            rows.forEach((r) => {
+              const vUrl = r.url || (r.id ? `https://www.youtube.com/watch?v=${r.id}` : "");
+              const cUrl = r.channelId ? `https://www.youtube.com/channel/${r.channelId}` : "";
+              let dv = r.dailyViews;
+              if (!dv || dv === 0) {
+                const pd = r.publishedAt ? new Date(r.publishedAt).getTime() : now;
+                const d = Math.max(1, Math.floor((now - pd) / 86400000));
+                dv = (r.viewCount || 0) / d;
+              }
+              ws.addRow({
+                thumb: "", title: r.title, channel: r.channelTitle, subs: r.channelSubs,
+                views: r.viewCount, comments: r.commentCount, pub: (r.publishedAt || "").slice(0, 10),
+                chpub: (r.channelPublishedAt || "").slice(0, 10), daily: Math.round(dv || 0),
+                contrib: r.contributionValue || "", desc: r.description || "",
+                vlink: vUrl ? { text: "영상보기", hyperlink: vUrl } : "", vurl: vUrl,
+                clink: cUrl ? { text: "채널이동", hyperlink: cUrl } : "", curl: cUrl,
+              });
+            });
+          } else if (activeTab === "channel-search" || activeTab === "saved-channel") {
+            ws.columns = [
+              { header: "프로필", key: "thumb", width: 25 }, { header: "채널명", key: "title", width: 35 },
+              { header: "구독자수", key: "subs", width: 15 }, { header: "채널개설일", key: "chpub", width: 15 },
+              { header: "채널설명", key: "desc", width: 55 }, { header: "채널링크", key: "clink", width: 25 },
+              { header: "실제채널주소", key: "curl", width: 40 },
+            ];
+            rows.forEach((r) => {
+              const cUrl = (r.id || r.channelId) ? `https://www.youtube.com/channel/${r.id || r.channelId}` : "";
+              ws.addRow({
+                thumb: "", title: r.channelTitle, subs: r.subscriberCount || r.channelSubs,
+                chpub: (r.channelPublishedAt || "").slice(0, 10), desc: r.description || "",
+                clink: cUrl ? { text: "채널이동", hyperlink: cUrl } : "", curl: cUrl,
+              });
+            });
+          }
+          for (let i = 2; i <= ws.rowCount; i++) ws.getRow(i).height = 95;
+          for (let i = 0; i < rows.length; i++) {
+            const r = rows[i];
+            const src = (activeTab === "channel-search" || activeTab === "saved-channel") ? r.profileThumb || r.thumb || "" : r.thumb || r.thumbnail || "";
+            if (!src) continue;
+            const b64 = await fetchImageAsBase64(src);
+            if (b64) {
+              const imgId = wb.addImage({ base64: b64.base64, extension: b64.ext });
+              ws.addImage(imgId, { tl: { col: 0, row: i + 1 }, ext: { width: 220, height: 124 } });
+            }
+          }
+          const buf = await wb.xlsx.writeBuffer();
+          const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = `${activeTab}_result.xlsx`;
+          a.click();
+        } catch (e) { alert("엑셀 저장 실패: " + (e?.message || e)); }
+      };
+
+      const handleSearchVideos = async () => {
+        setLoading(true); setError("");
+        try {
+          const want = Number(videoFilters.collect || 50);
+          const dayMap = { "1d": 1, "7d": 7, "1m": 30, "3m": 90, "6m": 180, "1y": 365 };
+          const pubAfter = dayMap[videoFilters.window] ? daysAgoISO(dayMap[videoFilters.window]) : undefined;
+          const chAfter = dayMap[videoFilters.channelWindow] ? daysAgoISO(dayMap[videoFilters.channelWindow]) : undefined;
+          const order = (videoFilters.sort && ["relevance", "viewCount", "date"].includes(videoFilters.sort)) ? videoFilters.sort : "relevance";
+          const subMin = Number(videoFilters.subMin || 0);
+          const viewMin = Number(videoFilters.viewMin || 0);
+          const lengthType = videoFilters.lengthType || "any";
+          const hasFilters = viewMin > 0 || subMin > 0 || chAfter || lengthType !== "any";
+          let collected = [];
+          const collectedIds = new Set();
+          const maxSearchPages = Math.ceil((hasFilters ? Math.max(want * 5, 500) : want) / 50) + 5;
+          let token = "";
+          let searchCount = 0;
+          while (collectedIds.size < want && searchCount < maxSearchPages) {
+            searchCount++;
+            const params = { q: q || "YouTube", type: "video", maxResults: 50, pageToken: token || undefined, regionCode: country, relevanceLanguage: LANGUAGE_MAP[country] };
+            if (order !== "relevance") params.order = order;
+            if (pubAfter) params.publishedAfter = pubAfter;
+            if (lengthType === "shorts") params.videoDuration = "short";
+            if (lengthType === "long") params.videoDuration = "long";
+            if (videoFilters.license !== "any") params.videoLicense = videoFilters.license;
+            const res = await ytSearch(params);
+            const ids = (res.items || []).map(x => x.id?.videoId).filter(id => id && !collectedIds.has(id));
+            if (!ids.length) break;
+            const vRes = await ytVideos(ids);
+            const items = (vRes.items || []).filter(v => v.id);
+            for (const v of items) {
+              if (collectedIds.has(v.id)) continue;
+              collected.push(v);
+              collectedIds.add(v.id);
+            }
+            token = res.nextPageToken;
+            if (!token) break;
+          }
+          const chIds = Array.from(new Set(collected.map(v => v.snippet.channelId)));
+          const chMap = new Map();
+          for (let i = 0; i < chIds.length; i += 50) {
+            const cres = await ytChannels(chIds.slice(i, i+50));
+            (cres.items || []).forEach(c => chMap.set(c.id, c));
+          }
+          const now = Date.now();
+          let mapped = collected.map(v => {
+            const ch = chMap.get(v.snippet.channelId);
+            const views = Number(v.statistics?.viewCount || 0);
+            const subs = Number(ch?.statistics?.subscriberCount || 0);
+            const pubMs = new Date(v.snippet.publishedAt).getTime();
+            const days = Math.max(1, Math.floor((now - pubMs) / 86400000));
+            return {
+              type: "video", id: v.id, url: `https://www.youtube.com/watch?v=${v.id}`, 
+              channelId: v.snippet.channelId, thumb: bestThumb(v.snippet.thumbnails),
+              title: v.snippet.title, channelTitle: v.snippet.channelTitle,
+              viewCount: views, durationSec: parseISODurationToSeconds(v.contentDetails.duration),
+              subscriberCount: subs, commentCount: Number(v.statistics?.commentCount || 0),
+              publishedAt: v.snippet.publishedAt, channelPublishedAt: ch?.snippet?.publishedAt || "",
+              dailyViews: views / days, description: v.snippet.description, license: v.status?.license || ""
+            };
+          });
+          if (viewMin) mapped = mapped.filter(v => v.viewCount >= viewMin);
+          if (subMin) mapped = mapped.filter(v => v.subscriberCount >= subMin);
+          if (chAfter) {
+            const at = new Date(chAfter).getTime();
+            mapped = mapped.filter(v => v.channelPublishedAt && new Date(v.channelPublishedAt).getTime() >= at);
+          }
+          setRowsByTab(prev => ({ ...prev, video: mapped.slice(0, want) }));
+        } catch (e) { setError("검색 중 오류: " + e.message); }
+        finally { setLoading(false); }
+      };
+
+      const handleChannelSearchTab = async () => {
+        setLoading(true); setError("");
+        try {
+          const collect = Number(channelSearchFilters.collect || 50);
+          const subMin = Number(channelSearchFilters.subMin || 0);
+          const dayMap = { "1d": 1, "7d": 7, "1m": 30, "3m": 90, "6m": 180, "1y": 365 };
+          const chAfter = dayMap[channelSearchFilters.channelWindow] ? daysAgoISO(dayMap[channelSearchFilters.channelWindow]) : undefined;
+          let collected = [];
+          let token = "";
+          while (collected.length < collect * 2) {
+            const res = await ytSearch({ q: channelSearchFilters.keyword || "YouTube", type: "channel", maxResults: 50, pageToken: token || undefined, regionCode: country });
+            collected = collected.concat(res.items || []);
+            token = res.nextPageToken;
+            if (!token) break;
+          }
+          const chIds = collected.map(c => c.id.channelId).filter(Boolean);
+          let fullList = [];
+          for (let i = 0; i < chIds.length; i += 50) {
+            const cres = await ytChannels(chIds.slice(i, i+50));
+            fullList = fullList.concat(cres.items || []);
+          }
+          let mapped = fullList.map(c => ({
+            type: "channel-search", id: c.id, profileThumb: bestThumb(c.snippet.thumbnails),
+            channelTitle: c.snippet.title, subscriberCount: Number(c.statistics?.subscriberCount || 0),
+            channelPublishedAt: c.snippet.publishedAt, description: c.snippet.description
+          }));
+          if (subMin) mapped = mapped.filter(m => m.subscriberCount >= subMin);
+          if (chAfter) mapped = mapped.filter(m => m.channelPublishedAt >= chAfter);
+          setRowsByTab(prev => ({ ...prev, "channel-search": mapped.slice(0, collect) }));
+        } catch (e) { setError(e.message); }
+        finally { setLoading(false); }
+      };
+
+      const handleSearchChannelVideos = async () => {
+        setLoading(true); setError("");
+        try {
+          const parsed = parseChannelInput(channelQ.trim());
+          let chId = parsed.channelId;
+          if (!chId && parsed.handle) chId = await resolveChannelByHandle(parsed.handle);
+          if (!chId) throw new Error("채널을 찾을 수 없습니다.");
+          const { channelInfo, videos } = await fetchChannelVideosAll(chId);
+          const minViews = Number(channelFilters.minViews || 0);
+          const rowsMapped = videos.map(v => {
+            const views = Number(v.statistics?.viewCount || 0);
+            const subs = Number(channelInfo.statistics?.subscriberCount || 0);
+            return {
+              type: "channelVideo", id: v.videoId, url: `https://www.youtube.com/watch?v=${v.videoId}`,
+              channelId: chId, thumb: v.thumbnail, title: v.title, channelTitle: channelInfo.snippet.title,
+              viewCount: views, subscriberCount: subs, channelSubs: subs, publishedAt: v.publishedAt,
+              durationSec: v.durationSec, description: v.description, license: v.license,
+              contributionValue: subs > 0 ? (views / subs) * 100 : 0
+            };
+          }).filter(r => r.viewCount >= minViews);
+          if (channelFilters.sort === "popular") rowsMapped.sort((a,b) => b.viewCount - a.viewCount);
+          else rowsMapped.sort((a,b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+          setRowsByTab(prev => ({ ...prev, channel: rowsMapped }));
+        } catch (e) { setError(e.message); }
+        finally { setLoading(false); }
+      };
+
+      const handleTrending = async () => {
+        setLoading(true); setError("");
+        try {
+          const res = await ytMostPopular({ regionCode: trendCountry || country });
+          const items = (res.items || []).map(v => ({
+            type: "trending", id: v.id, url: `https://www.youtube.com/watch?v=${v.id}`,
+            thumb: bestThumb(v.snippet.thumbnails), title: v.snippet.title,
+            channelTitle: v.snippet.channelTitle, channelId: v.snippet.channelId,
+            viewCount: Number(v.statistics?.viewCount || 0),
+            durationSec: parseISODurationToSeconds(v.contentDetails.duration),
+            publishedAt: v.snippet.publishedAt,
+            commentCount: Number(v.statistics?.commentCount || 0),
+            description: v.snippet.description
+          }));
+          const chIds = Array.from(new Set(items.map(it => it.channelId)));
+          const chMap = new Map();
+          for (let i = 0; i < chIds.length; i += 50) {
+            const cres = await ytChannels(chIds.slice(i, i+50));
+            (cres.items || []).forEach(c => chMap.set(c.id, c));
+          }
+          const mapped = items.map(it => {
+            const ch = chMap.get(it.channelId);
+            return { ...it, subscriberCount: Number(ch?.statistics?.subscriberCount || 0), channelPublishedAt: ch?.snippet?.publishedAt || "" };
+          });
+          setRowsByTab(prev => ({ ...prev, trending: mapped }));
+        } catch (e) { setError(e.message); }
+        finally { setLoading(false); }
+      };
+
+      const handleViewCaptions = async (videoId) => { setShowCaptionModal(true); setCaptionLoading(true); setCaptionContent(""); setCaptionAnalysis(""); const txt = await fetchCaptions(videoId); setCaptionContent(txt); setCaptionLoading(false); };
+      const openCommentModal = async (videoId, title, maxCount = 10) => { setShowCommentModal(true); setCommentVideoTitle(title); setCommentLoading(true); setCommentItems([]); setCommentTargetVideoId(videoId); setCommentAnalysis(""); try { const comments = await fetchVideoComments(videoId, maxCount); setCommentItems(comments); } catch (e) { setCommentItems([{ author: "시스템", text: "댓글을 가져오는 중 오류: " + (e?.message || e), publishedAt: "", likeCount: 0, },]); } finally { setCommentLoading(false); } };
+      const handleReloadComments = async () => { if (!commentTargetVideoId) return; await openCommentModal(commentTargetVideoId, commentVideoTitle, commentCountSel); };
+      const handleCopyComments = () => { const text = commentItems.map((c) => `${c.author}: ${c.text.replace(/<[^>]*>/g, "")}`).join("\n"); navigator.clipboard.writeText(text).then(() => alert("복사되었습니다.")); };
+      const handleAnalyzeComments = async () => { try { if (!commentItems.length) return; setCommentAnalysisLoading(true); setCommentAnalysis(""); const rawComments = commentItems.map(c => c.text).join("\n"); const promptForComments = ` 유튜브 전문가 관점에서 시청자 반응을 분석해줘. 아래 형식에 맞게 섹션별로 요약해줘. 마크다운(##, **, --- 등)은 사용하지 마. 각 항목은 2~4줄 안으로만 작성해. 필요하면 이모지(😊, ❗, 👉 등) 정도만 써서 가독성만 높여줘. [1. 시청자 전체 분위기] 한 문장으로 요약 [2. 긍정 반응 TOP 3] -  [3. 불만 및 개선 요구 TOP 3] -  [4. 자주 언급된 키워드] 콤마로 구분해서 [5. 다음 영상 기획 시 참고 포인트] 번호로 구체적 조언 아래는 댓글 원문이야: `; const result = await callGeminiAPI(promptForComments, rawComments); setCommentAnalysis(result); } catch (e) { setCommentAnalysis("분석 중 오류: " + (e?.message || e)); } finally { setCommentAnalysisLoading(false); } };
+      const handleCopyCommentAnalysis = () => { if (!commentAnalysis) return; navigator.clipboard.writeText(commentAnalysis).then(() => alert("분석 결과를 복사했습니다.")); };
+      const handleCopyCaptionRaw = () => { if (!captionContent) return; navigator.clipboard.writeText(captionContent).then(() => { alert("자막을 복사했습니다."); }); };
+      const handleAnalyzeCaption = async () => { try { if (!captionContent) return; setCaptionAnalysisLoading(true); setCaptionAnalysis(""); const promptForTranscript = ` 유튜브 전문가 관점에서 자막을 분석해줘. 다음 항목별로 평가하고 개선점을 마지막에 정리해줘. 마크다운(##, **, --- 등)은 사용하지 마. 각 항목은 2~4줄 안으로만 작성해. 필요하면 이모지(😊, ❗, 👉 등) 정도만 써서 가독성만 높여줘. [후킹 평가] -  [대본 구조] -  [화법/톤] -  [스토리텔링 기법] -  [CTA(Call To Action)] -  [키워드/SEO 관점] -  [개선 포인트] 번호로 제시 이후는 자막 원문이야: `; const result = await callGeminiAPI(promptForTranscript, captionContent); setCaptionAnalysis(result); } catch (e) { setCaptionAnalysis("분석 중 오류: " + (e?.message || e)); } finally { setCaptionAnalysisLoading(false); } };
+      const handleCopyCaptionAnalysis = () => { if (!captionAnalysis) return; navigator.clipboard.writeText(captionAnalysis).then(() => alert("분석 결과를 복사했습니다.")); };
+      const openDescriptionModal = (content, title = "") => { setDescTitle(title || "설명"); setDescContent(content || "설명이 없습니다."); setShowDescModal(true); };
+
+
+      /* ---------------- 렌더 ---------------- */
+      return (
+        <div className="min-h-screen bg-slate-50 p-4">
+          <div className="max-w-[1400px] mx-auto space-y-5">
+            {/* 헤더 */}
+            <header className="flex items-center justify-between bg-white p-3 rounded-xl border">
+              <div className="flex items-center gap-3">
+                <img src="https://store.img11.co.kr/70064898/a320c6fb-b24a-4761-8eac-fed83ceffd80_1762746721708.png" alt="Profile" className="w-10 h-10 rounded-lg border object-cover" />
+                <div>
+                  <div className="text-lg font-semibold">Tube Research</div>
+                  <div className="text-xs text-slate-500">AI 기반 유튜브 분석 툴</div>
+                </div>
+              </div>
+
+              {/* 추가된 버튼 영역 */}
+              <div className="flex gap-3 items-center">
+                <a href="https://cafe.naver.com/pink2dxzb" target="_blank" rel="noreferrer" className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-orange-50 text-orange-700 text-sm font-semibold border border-orange-100 hover:bg-orange-100 transition-all">
+                  <span>☕</span> 카페바로가기
+                </a>
+                <button onClick={() => setShowCoffeeModal(true)} className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-yellow-50 text-yellow-700 text-sm font-semibold border border-yellow-100 hover:bg-yellow-100 transition-all">
+                  <span>🥤</span> 커피한잔사주기
+                </button>
+              </div>
+
+              <div className="flex gap-2 items-center">
+                <button onClick={() => setShowApiModal(true)} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm">YouTube API 키 입력</button>
+                <button onClick={() => setShowGeminiModal(true)} className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-sm">Gemini API 키 입력</button>
+                <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" className="text-sm text-sky-700 underline">API 키 발급</a>
+              </div>
+            </header>
+
+            {/* 탭 + 국가 + 엑셀 */}
+            <div className="flex gap-2 items-center bg-white border rounded-xl px-4 py-3">
+              <button onClick={() => setTab("video")} className={`px-4 py-2 rounded-xl border text-sm ${tab === "video" ? "bg-sky-600 text-white" : "bg-white"}`}>영상검색</button>
+              <button onClick={() => setTab("channel-search")} className={`px-4 py-2 rounded-xl border text-sm ${tab === "channel-search" ? "bg-sky-600 text-white" : "bg-white"}`}>채널검색</button>
+              <button onClick={() => setTab("channel")} className={`px-4 py-2 rounded-xl border text-sm ${tab === "channel" ? "bg-sky-600 text-white" : "bg-white"}`}>채널분석</button>
+              <button onClick={() => setTab("trending")} className={`px-4 py-2 rounded-xl border text-sm ${tab === "trending" ? "bg-sky-600 text-white" : "bg-white"}`}>인기급상승</button>
+              <button onClick={() => { setTab("saved"); setShowSavedModal(true); setSavedModalType("channel"); }} className={`px-4 py-2 rounded-xl border text-sm ${tab === "saved" ? "bg-sky-600 text-white" : "bg-white"}`}>저장</button>
+              <button onClick={() => setTab("speech-time")} className={`px-4 py-2 rounded-xl border text-sm ${tab === "speech-time" ? "bg-sky-600 text-white" : "bg-white"}`}>발표시간계산기</button>
+              <button onClick={() => setTab("download")} className={`px-4 py-2 rounded-xl border text-sm ${tab === "download" ? "bg-sky-600 text-white" : "bg-white"}`}>영상 다운로드</button>
+              <button onClick={() => setTab("convert")} className={`px-4 py-2 rounded-xl border text-sm ${tab === "convert" ? "bg-sky-600 text-white" : "bg-white"}`}>MP4 {'->'} MP3 변환</button>
+              <div className="ml-auto flex items-center gap-2">
+                <label className="text-xs text-slate-600">국가</label>
+                <select value={country} onChange={(e) => setCountry(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm">
+                  {Object.entries(COUNTRY_CODES).map(([n, c]) => (<option key={c} value={c}>{n}</option>))}
+                </select>
+                <button onClick={() => tab !== "speech-time" && tab !== 'download' && tab !== 'convert' && exportExcel(tab)} disabled={tab === "speech-time" || tab === 'download' || tab === 'convert'} className={`px-3 py-1.5 rounded-lg text-sm ${tab === "speech-time" || tab === 'download' || tab === 'convert' ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-emerald-500 text-white"}`}>엑셀로 내보내기</button>
+              </div>
+            </div>
+
+            {/* 각 탭별 필터 UI */}
+            {tab === "video" && (<section className="bg-white border rounded-xl p-4 flex flex-wrap items-end gap-3"><div className="min-w-[280px]"><label className="text-[11px] text-slate-600">키워드</label><div className="flex gap-2 mt-1"><input type="text" autoComplete="off" value={q} onChange={(e) => setQ(e.target.value)} className="border rounded-lg px-2.5 py-1 text-[12px] flex-1" placeholder="예: 브이로그, 리액트 강의" /><button onClick={handleSearchVideos} className="px-2.5 py-1 rounded-lg bg-sky-600 text-white text-[12px]">검색</button></div></div><div><label className="text-[11px] text-slate-600">영상기간</label><select value={videoFilters.window} onChange={(e) => setVideoFilters((s) => ({ ...s, window: e.target.value, }))} className="mt-1 border rounded-lg px-2.5 py-1 text-[12px]"><option value="any">전체</option><option value="1d">1일</option><option value="7d">7일</option><option value="1m">1개월</option><option value="3m">3개월</option><option value="6m">6개월</option><option value="1y">1년</option></select></div><div><label className="text-[11px] text-slate-600">채널기간</label><select value={videoFilters.channelWindow} onChange={(e) => setVideoFilters((s) => ({ ...s, channelWindow: e.target.value, }))} className="mt-1 border rounded-lg px-2.5 py-1 text-[12px]"><option value="any">전체</option><option value="1d">1일</option><option value="7d">7일</option><option value="1m">1개월</option><option value="3m">3개월</option><option value="6m">6개월</option><option value="1y">1년</option></select></div><div><label className="text-[11px] text-slate-600">정렬</label><select value={videoFilters.sort} onChange={(e) => setVideoFilters((s) => ({ ...s, sort: e.target.value, }))} className="mt-1 border rounded-lg px-2.5 py-1 text-[12px]"><option value="relevance">관련성</option><option value="viewCount">조회수</option><option value="date">등록일</option></select></div><div><label className="text-[11px] text-slate-600">영상 길이</label><select value={videoFilters.lengthType} onChange={(e) => setVideoFilters((s) => ({ ...s, lengthType: e.target.value, }))} className="mt-1 border rounded-lg px-2.5 py-1 text-[12px]"><option value="any">전체</option><option value="shorts">쇼츠(3분↓)</option><option value="long">롱폼(3분↑)</option></select></div><div><label className="text-[11px] text-slate-600">CC</label><select value={videoFilters.license} onChange={(e) => setVideoFilters((s) => ({ ...s, license: e.target.value, }))} className="mt-1 border rounded-lg px-2.5 py-1 text-[12px]"><option value="any">전체</option><option value="creativeCommon">CC</option></select></div><div><label className="text-[11px] text-slate-600">최소 조회수</label><select value={videoFilters.viewMin} onChange={(e) => setVideoFilters((s) => ({ ...s, viewMin: e.target.value, }))} className="mt-1 border rounded-lg px-2.5 py-1 text-[12px]"><option value="0">제한 없음</option><option value="1000">1천+</option><option value="5000">5천+</option><option value="10000">1만+</option><option value="20000">2만+</option><option value="50000">5만+</option><option value="100000">10만+</option></select></div><div><label className="text-[11px] text-slate-600">구독자 이상</label><select value={videoFilters.subMin} onChange={(e) => setVideoFilters((s) => ({ ...s, subMin: e.target.value, }))} className="mt-1 border rounded-lg px-2.5 py-1 text-[12px]"><option value="0">제한 없음</option><option value="1000">1천+</option><option value="5000">5천+</option><option value="10000">1만+</option><option value="50000">5만+</option><option value="100000">10만+</option></select></div><div><label className="text-[11px] text-slate-600">수집 개수</label><select value={videoFilters.collect} onChange={(e) => setVideoFilters((s) => ({ ...s, collect: e.target.value, }))} className="mt-1 border rounded-lg px-2.5 py-1 text-[12px]"><option value="50">50개</option><option value="100">100개</option><option value="200">200개</option><option value="500">500개</option></select></div></section>)}
+            {tab === "channel-search" && (<section className="bg-white border rounded-xl p-4 flex flex-wrap items-end gap-3"><div className="min-w-[260px]"><label className="text-xs text-slate-600">채널 키워드</label><div className="flex gap-2 mt-1"><input type="text" autoComplete="off" value={channelSearchFilters.keyword} onChange={(e) => setChannelSearchFilters((s) => ({ ...s, keyword: e.target.value, }))} className="border rounded-lg px-3 py-1.5 text-sm flex-1" placeholder="예: 여행, 요리, 리뷰 채널" /><button onClick={handleChannelSearchTab} className="px-3 py-1.5 rounded-lg bg-sky-600 text-white text-sm">검색</button></div></div><div><label className="text-xs text-slate-600">채널기간</label><select value={channelSearchFilters.channelWindow} onChange={(e) => setChannelSearchFilters((s) => ({ ...s, channelWindow: e.target.value, }))} className="mt-1 border rounded-lg px-3 py-1.5 text-sm"><option value="any">전체</option><option value="1d">1일</option><option value="7d">7일</option><option value="1m">1개월</option><option value="3m">3개월</option><option value="6m">6개월</option><option value="1y">1년</option></select></div><div><label className="text-xs text-slate-600">구독자 이상</label><select value={channelSearchFilters.subMin} onChange={(e) => setChannelSearchFilters((s) => ({ ...s, subMin: e.target.value, }))} className="mt-1 border rounded-lg px-3 py-1.5 text-sm"><option value="0">제한 없음</option><option value="1000">1천+</option><option value="5000">5천+</option><option value="10000">1만+</option><option value="50000">5만+</option><option value="100000">10만+</option></select></div><div><label className="text-xs text-slate-600">수집 개수</label><select value={channelSearchFilters.collect} onChange={(e) => setChannelSearchFilters((s) => ({ ...s, collect: e.target.value, }))} className="mt-1 border rounded-lg px-3 py-1.5 text-sm"><option value="50">50개</option><option value="100">100개</option><option value="200">200개</option><option value="500">500개</option></select></div></section>)}
+            {tab === "channel" && (<section className="bg-white border rounded-xl p-4 flex flex-wrap items-end gap-3"><div className="min-w-[340px]"><label className="text-xs text-slate-600">채널 URL / ID / @handle</label><div className="flex gap-2 mt-1"><input type="text" autoComplete="off" value={channelQ} onChange={(e) => setChannelQ(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm flex-1" placeholder="https://www.youtube.com/@channel" /><button onClick={handleSearchChannelVideos} className="px-3 py-1.5 rounded-lg bg-sky-600 text-white text-sm">가져오기</button></div></div><div><label className="text-xs text-slate-600">정렬</label><select value={channelFilters.sort} onChange={(e) => setChannelFilters((s) => ({ ...s, sort: e.target.value, }))} className="mt-1 border rounded-lg px-3 py-1.5 text-sm"><option value="date">업로드일순</option><option value="popular">조회수순</option></select></div><div><label className="text-xs text-slate-600">최소 조회수</label><select value={channelFilters.minViews} onChange={(e) => setChannelFilters((s) => ({ ...s, minViews: e.target.value, }))} className="mt-1 border rounded-lg px-3 py-1.5 text-sm"><option value="0">제한 없음</option><option value="1000">1천+</option><option value="5000">5천+</option><option value="10000">1만+</option><option value="50000">5만+</option></select></div><div><label className="text-xs text-slate-600">영상 길이</label><select value={channelFilters.lengthType} onChange={(e) => setChannelFilters((s) => ({ ...s, lengthType: e.target.value, }))} className="mt-1 border rounded-lg px-3 py-1.5 text-sm"><option value="any">전체</option><option value="shorts">쇼츠</option><option value="long">롱폼</option></select></div></section>)}
+            {tab === "trending" && (<section className="bg-white border rounded-xl p-4 flex flex-wrap items-end gap-3"><div><label className="text-xs text-slate-600">국가(이 탭만)</label><select value={trendCountry} onChange={(e) => setTrendCountry(e.target.value)} className="mt-1 border rounded-lg px-3 py-1.5 text-sm">{Object.entries(COUNTRY_CODES).map(([n, c]) => (<option key={c} value={c}>{n}</option>))}</select></div><div><label className="text-xs text-slate-600">영상 길이</label><select value={trendFilters.lengthType} onChange={(e) => setTrendFilters((s) => ({ ...s, lengthType: e.target.value, }))} className="mt-1 border rounded-lg px-3 py-1.5 text-sm"><option value="any">전체</option><option value="shorts">쇼츠</option><option value="long">롱폼</option></select></div><button onClick={handleTrending} className="px-3 py-1.5 rounded-lg bg-sky-600 text-white text-sm">불러오기</button></section>)}
+
+            {/* 영상 다운로드 UI */}
+            {tab === "download" && (
+              <section className="bg-white border rounded-xl p-4 space-y-4">
+                <div>
+                  <label className="text-sm font-semibold text-slate-700">다운로드할 영상 URL</label>
+                  <p className="text-xs text-slate-500 mt-1 mb-2">한 줄에 하나씩 URL을 입력하세요.</p>
+                  <textarea
+                    value={downloadUrls}
+                    onChange={(e) => setDownloadUrls(e.target.value)}
+                    className="w-full h-32 border rounded-lg p-2 text-sm resize-y"
+                    placeholder="https://www.youtube.com/watch?v=..."
+                    disabled={downloadLoading}
+                  />
+                </div>
+                <div className="flex items-center gap-6">
+                  <span className="text-sm font-semibold text-slate-700">다운로드 모드</span>
+                  <div className="flex items-center gap-4">
+                    <label className="flex items-center gap-1.5 cursor-pointer"><input type="radio" value="both" checked={downloadMode === 'both'} onChange={() => setDownloadMode('both')} disabled={downloadLoading} /><span className="text-sm">영상 + 자막</span></label>
+                    <label className="flex items-center gap-1.5 cursor-pointer"><input type="radio" value="video" checked={downloadMode === 'video'} onChange={() => setDownloadMode('video')} disabled={downloadLoading} /><span className="text-sm">영상만</span></label>
+                    <label className="flex items-center gap-1.5 cursor-pointer"><input type="radio" value="subs" checked={downloadMode === 'subs'} onChange={() => setDownloadMode('subs')} disabled={downloadLoading} /><span className="text-sm">자막만</span></label>
+                  </div>
+                </div>
+                <div>
+                  <button onClick={handleDownload} disabled={downloadLoading} className="px-4 py-2 rounded-lg bg-sky-600 text-white text-sm w-full disabled:bg-slate-400 disabled:cursor-not-allowed">
+                    {downloadLoading ? "다운로드 진행 중..." : "다운로드 시작"}
+                  </button>
+                </div>
+                {downloadLogs.length > 0 && (
+                  <div className="border-t pt-4 mt-4">
+                    <h3 className="text-sm font-semibold text-slate-700 mb-2">다운로드 현황</h3>
+                    <div className="max-h-60 overflow-y-auto space-y-2 bg-slate-50 p-3 rounded-lg text-xs scrollbar-thin">
+                      {downloadLogs.map((log) => {
+                        const statusColor =
+                          log.status === 'ok' ? 'bg-emerald-100 border-emerald-300' :
+                            log.status === 'error' ? 'bg-red-100 border-red-300' :
+                              log.status === 'progress' ? 'bg-sky-100 border-sky-300' :
+                                'bg-slate-100 border-slate-300';
+                        return (
+                          <div key={log.url} className={`p-2.5 rounded border ${statusColor}`}>
+                            <p className="font-semibold truncate text-slate-800 text-[13px]">{log.url}</p>
+                            {log.status === 'progress' && (
+                              <div className="mt-2">
+                                <div className="w-full bg-slate-200 rounded-full h-1.5">
+                                  <div className="bg-sky-500 h-1.5 rounded-full" style={{ width: `${log.percent}%` }}></div>
+                                </div>
+                              </div>
+                            )}
+                            <p className="mt-1.5 text-slate-600">{log.message}</p>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+              </section>
+            )}
+
+            {/* MP4 -> MP3 변환 UI */}
+            {tab === "convert" && (
+              <section className="bg-white border rounded-xl p-6 flex flex-col items-center justify-center space-y-4 min-h-[300px]"
+                onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('bg-sky-50'); }}
+                onDragLeave={(e) => { e.preventDefault(); e.currentTarget.classList.remove('bg-sky-50'); }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.currentTarget.classList.remove('bg-sky-50');
+                  const file = e.dataTransfer.files[0];
+                  if (file && file.type.startsWith('video/')) setConvertFile(file);
+                  else alert('영상 파일만 업로드 가능합니다.');
+                }}
+              >
+                <div className="w-20 h-20 bg-sky-100 rounded-full flex items-center justify-center text-sky-600 mb-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                  </svg>
+                </div>
+                <div className="text-center">
+                  <p className="text-lg font-semibold text-slate-800">영상 파일을 드래그하거나 클릭하여 업로드</p>
+                  <p className="text-sm text-slate-500 mt-1">MP4, MKV, AVI, MOV 등 지원 (최대 500MB)</p>
+                </div>
+                <input type="file" id="fileUpload" className="hidden" accept="video/*" onChange={(e) => setConvertFile(e.target.files[0])} />
+                <label htmlFor="fileUpload" className="px-6 py-2.5 bg-white border-2 border-sky-600 text-sky-600 rounded-xl font-semibold cursor-pointer hover:bg-sky-50 transition-colors">파일 선택</label>
+                
+                {convertFile && (
+                  <div className="mt-4 p-4 bg-slate-50 border rounded-xl w-full max-w-md flex items-center justify-between">
+                    <div className="flex items-center gap-3 truncate">
+                      <div className="bg-sky-600 text-white p-2 rounded-lg">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                        </svg>
+                      </div>
+                      <span className="text-sm font-medium text-slate-700 truncate">{convertFile.name}</span>
+                    </div>
+                    <button onClick={() => setConvertFile(null)} className="text-slate-400 hover:text-red-500">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                      </svg>
+                    </button>
+                  </div>
+                )}
+                {convertError && <p className="text-red-500 text-sm mt-2">{convertError}</p>}
+                <button id="convertStartButton" onClick={handleConvertMP3} disabled={!convertFile || convertLoading} className={`mt-4 px-10 py-3 rounded-xl font-bold text-lg shadow-lg transition-all ${!convertFile || convertLoading ? 'bg-slate-300 text-slate-500 cursor-not-allowed' : 'bg-gradient-to-r from-sky-600 to-indigo-600 text-white hover:scale-105 active:scale-95'}`}>
+                  {convertLoading ? "MP3 변환 중..." : "MP3로 무손실 변환 시작"}
+                </button>
+              </section>
+            )}
+
+            <div className="text-sm text-red-500">{error}</div>
+
+            {/* 결과 영역 */}
+            {tab !== 'speech-time' && tab !== 'download' && tab !== 'saved' && tab !== 'convert' && (
+              <div className="bg-white border rounded-xl overflow-hidden">
+                {/* 저장 버튼 영역 */}
+                {(tab === "video" || tab === "channel" || tab === "trending" || tab === "channel-search") && (
+                  <div className="px-4 py-3 border-b flex items-center gap-2">
+                    <button onClick={handleSelectAll} className="px-3 py-1.5 rounded-lg border text-sm">
+                      {selectedRows.size === sortedRows.length ? "전체 해제" : "전체 선택"}
+                    </button>
+                    {(tab === "channel-search") && (
+                      <button onClick={handleSaveChannels} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm">
+                        채널저장 ({selectedRows.size})
+                      </button>
+                    )}
+                    {(tab === "video" || tab === "channel" || tab === "trending") && (
+                      <>
+                        <button onClick={handleSaveVideos} className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-sm">
+                          영상저장 ({selectedRows.size})
+                        </button>
+                        <button onClick={handleSaveChannels} className="px-3 py-1.5 rounded-lg bg-violet-600 text-white text-sm">
+                          채널저장 ({selectedRows.size})
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+                <div className="overflow-auto max-h-[540px]">
+                  <table className="min-w-full text-sm table-fixed">
+                    <thead className="bg-slate-100 sticky top-0 z-10">
+                      {tab === "channel-search" && (<tr> <th className="px-2 py-2 text-center w-8"><input type="checkbox" checked={selectedRows.size === sortedRows.length && sortedRows.length > 0} onChange={handleSelectAll} /></th> <th className="px-2 py-2 text-center w-40">프로필</th> <th className="px-2 py-2 text-center w-56 cursor-pointer select-none" onClick={() => handleHeaderSort("channelTitle")}>채널명{renderSortArrow("channelTitle")}</th> <th className="px-2 py-2 text-center w-28 cursor-pointer select-none" onClick={() => handleHeaderSort("subscriberCount")}>구독자수{renderSortArrow("subscriberCount")}</th> <th className="px-2 py-2 text-left w-28 cursor-pointer select-none" onClick={() => handleHeaderSort("channelPublishedAt")}>채널개설일{renderSortArrow("channelPublishedAt")}</th> <th className="px-2 py-2 text-center w-72">채널설명</th> </tr>)}
+                      {tab === "video" && (<tr> <th className="px-2 py-2 text-center w-8"><input type="checkbox" checked={selectedRows.size === sortedRows.length && sortedRows.length > 0} onChange={handleSelectAll} /></th> <th className="px-2 py-2 text-center w-60">썸네일</th> <th className="px-2 py-2 text-center w-48 cursor-pointer select-none" onClick={() => handleHeaderSort("title")}>제목{renderSortArrow("title")}</th> <th className="px-2 py-2 text-center w-16 cursor-pointer select-none" onClick={() => handleHeaderSort("channelTitle")}>채널{renderSortArrow("channelTitle")}</th> <th className="px-2 py-2 text-center w-24 cursor-pointer select-none" onClick={() => handleHeaderSort("subscriberCount")}>구독자수{renderSortArrow("subscriberCount")}</th> <th className="px-2 py-2 text-center w-20 cursor-pointer select-none" onClick={() => handleHeaderSort("viewCount")}>조회수{renderSortArrow("viewCount")}</th> <th className="px-2 py-2 text-center w-28 cursor-pointer select-none" onClick={() => handleHeaderSort("durationSec")}>길이(초){renderSortArrow("durationSec")}</th> <th className="px-2 py-2 text-center w-20 cursor-pointer select-none" onClick={() => handleHeaderSort("commentCount")}>댓글{renderSortArrow("commentCount")}</th> <th className="px-2 py-2 text-center w-40 cursor-pointer select-none" onClick={() => handleHeaderSort("publishedAt")}>게시일{renderSortArrow("publishedAt")}</th> <th className="px-2 py-2 text-center w-40 cursor-pointer select-none" onClick={() => handleHeaderSort("channelPublishedAt")}>채널개설일{renderSortArrow("channelPublishedAt")}</th> <th className="px-2 py-2 text-center w-20 cursor-pointer select-none" onClick={() => handleHeaderSort("dailyViews")}>기여도{renderSortArrow("dailyViews")}</th> <th className="px-2 py-2 text-center w-16">CC</th> <th className="px-2 py-2 text-center w-16">설명</th> <th className="px-2 py-2 text-left w-20">자막</th> </tr>)}
+                      {tab === "channel" && (<tr> <th className="px-2 py-2 text-center w-8"><input type="checkbox" checked={selectedRows.size === sortedRows.length && sortedRows.length > 0} onChange={handleSelectAll} /></th> <th className="px-2 py-2 text-center w-72">썸네일</th> <th className="px-2 py-2 text-center w-60 cursor-pointer select-none" onClick={() => handleHeaderSort("title")}>제목{renderSortArrow("title")}</th> <th className="px-2 py-2 text-center w-36 cursor-pointer select-none" onClick={() => handleHeaderSort("channelTitle")}>채널{renderSortArrow("channelTitle")}</th> <th className="px-2 py-2 text-center w-24 cursor-pointer select-none" onClick={() => handleHeaderSort("channelSubs")}>구독자수{renderSortArrow("channelSubs")}</th> <th className="px-2 py-2 text-center w-24 cursor-pointer select-none" onClick={() => handleHeaderSort("viewCount")}>조회수{renderSortArrow("viewCount")}</th> <th className="px-2 py-2 text-center w-20 cursor-pointer select-none" onClick={() => handleHeaderSort("commentCount")}>댓글{renderSortArrow("commentCount")}</th> <th className="px-2 py-2 text-center w-32 cursor-pointer select-none" onClick={() => handleHeaderSort("publishedAt")}>게시일{renderSortArrow("publishedAt")}</th> <th className="px-2 py-2 text-center w-32 cursor-pointer select-none" onClick={() => handleHeaderSort("channelPublishedAt")}>채널개설일{renderSortArrow("channelPublishedAt")}</th> <th className="px-2 py-2 text-center w-24 cursor-pointer select-none" onClick={() => handleHeaderSort("contributionValue")}>채널기여도{renderSortArrow("contributionValue")}</th> <th className="px-2 py-2 text-center w-16">CC</th> <th className="px-2 py-2 text-center w-32">설명</th> <th className="px-2 py-2 text-left w-16">자막</th> </tr>)}
+                      {tab === "trending" && (<tr> <th className="px-2 py-2 text-center w-8"><input type="checkbox" checked={selectedRows.size === sortedRows.length && sortedRows.length > 0} onChange={handleSelectAll} /></th> <th className="px-2 py-2 text-center w-64">썸네일</th> <th className="px-2 py-2 text-center w-56 cursor-pointer select-none" onClick={() => handleHeaderSort("title")}>제목{renderSortArrow("title")}</th> <th className="px-2 py-2 text-center w-24 cursor-pointer select-none" onClick={() => handleHeaderSort("channelTitle")}>채널{renderSortArrow("channelTitle")}</th> <th className="px-2 py-2 text-center w-24 cursor-pointer select-none" onClick={() => handleHeaderSort("subscriberCount")}>구독자수{renderSortArrow("subscriberCount")}</th> <th className="px-2 py-2 text-center w-24 cursor-pointer select-none" onClick={() => handleHeaderSort("viewCount")}>조회수{renderSortArrow("viewCount")}</th> <th className="px-2 py-2 text-center w-20 cursor-pointer select-none" onClick={() => handleHeaderSort("commentCount")}>댓글{renderSortArrow("commentCount")}</th> <th className="px-2 py-2 text-center w-32 cursor-pointer select-none" onClick={() => handleHeaderSort("publishedAt")}>게시일{renderSortArrow("publishedAt")}</th> <th className="px-2 py-2 text-center w-32 cursor-pointer select-none" onClick={() => handleHeaderSort("channelPublishedAt")}>채널개설일{renderSortArrow("channelPublishedAt")}</th> <th className="px-2 py-2 text-center w-32 cursor-pointer select-none" onClick={() => handleHeaderSort("growthPerHour")}>48h 증가(/h){renderSortArrow("growthPerHour")}</th> <th className="px-2 py-2 text-center w-16">CC</th> <th className="px-2 py-2 text-center w-32">설명</th> <th className="px-2 py-2 text-left w-16">자막</th> </tr>)}
+                    </thead>
+                    <tbody>
+                      {loading && (<tr> <td colSpan="15" className="text-center py-10 text-slate-400">불러오는 중...</td> </tr>)}
+                      {!loading && tab === "channel-search" && sortedRows.map((r) => (<tr key={r.id} className="border-b last:border-0 hover:bg-slate-50"> <td className="px-2 py-2 text-center"><input type="checkbox" checked={selectedRows.has(r.id)} onChange={() => handleToggleRow(r.id)} /></td> <td className="px-2 py-2">{r.profileThumb ? <img src={r.profileThumb} alt="" className="w-40 h-40 object-cover rounded" /> : "-"}</td> <td className="px-2 py-2 relative"><div className="relative inline-block"><button onClick={(e) => { e.stopPropagation(); setChannelMenuOpen(channelMenuOpen === r.id ? null : r.id); }} className="text-slate-900 hover:text-sky-600 font-medium">{r.channelTitle}</button>{channelMenuOpen === r.id && r.id && (<div className="absolute left-0 top-full mt-1 bg-white border rounded-lg shadow-lg z-50 min-w-[120px]"><button onClick={(e) => { e.stopPropagation(); handleCopyChannelUrl(r.id); }} className="block w-full text-left px-3 py-2 text-sm hover:bg-slate-100">복사</button><button onClick={(e) => { e.stopPropagation(); handleOpenChannel(r.id); }} className="block w-full text-left px-3 py-2 text-sm hover:bg-slate-100">이동</button></div>)}</div></td> <td className="px-2 py-2 text-center">{shortNumber(r.subscriberCount)}</td> <td className="px-2 py-2">{(r.channelPublishedAt || "").slice(0, 10)}</td> <td className="px-2 py-2 text-slate-600"><button type="button" onClick={() => openDescriptionModal(r.description || "", r.channelTitle)} className="text-left w-full"><div className="line-clamp-2 max-w-[360px]">{r.description || ""}</div></button></td> </tr>))}
+                      {!loading && tab === "video" && sortedRows.map((r) => (<tr key={r.id} className="border-b last:border-0 hover:bg-slate-50"> <td className="px-2 py-2 text-center"><input type="checkbox" checked={selectedRows.has(r.id)} onChange={() => handleToggleRow(r.id)} /></td> <td className="px-2 py-2">{r.thumb ? <div className="w-[200px] aspect-video bg-slate-100 rounded overflow-hidden"><img src={r.thumb} alt="" className="w-full h-full object-cover" /></div> : "-"}</td> <td className="px-2 py-2"><a href={r.url} target="_blank" rel="noreferrer" className="text-slate-900 hover:text-sky-600 font-medium line-clamp-2 max-w-[280px]">{r.title}</a></td> <td className="px-2 py-2 text-center relative"><div className="relative inline-block"><button onClick={(e) => { e.stopPropagation(); setChannelMenuOpen(channelMenuOpen === r.id ? null : r.id); }} className="text-slate-700 hover:text-sky-600 truncate max-w-[80px]">{r.channelTitle}</button>{channelMenuOpen === r.id && r.channelId && (<div className="absolute left-0 top-full mt-1 bg-white border rounded-lg shadow-lg z-50 min-w-[120px]"><button onClick={(e) => { e.stopPropagation(); handleCopyChannelUrl(r.channelId); }} className="block w-full text-left px-3 py-2 text-sm hover:bg-slate-100">복사</button><button onClick={(e) => { e.stopPropagation(); handleOpenChannel(r.channelId); }} className="block w-full text-left px-3 py-2 text-sm hover:bg-slate-100">이동</button></div>)}</div></td> <td className="px-2 py-2 text-center">{shortNumber(r.subscriberCount || r.channelSubs)}</td> <td className="px-2 py-2 text-center">{shortNumber(r.viewCount)}</td> <td className="px-2 py-2 text-center">{r.durationSec || "-"}</td> <td className="px-2 py-2 text-center"><button onClick={() => openCommentModal(r.id, r.title, 10)} className="text-sky-600 hover:underline">{shortNumber(r.commentCount)}</button></td> <td className="px-2 py-2 text-center whitespace-nowrap">{(r.publishedAt || "").slice(0, 10)}</td> <td className="px-2 py-2 text-center whitespace-nowrap">{(r.channelPublishedAt || "").slice(0, 10)}</td> <td className="px-2 py-2 text-right">{Math.round(r.dailyViews || 0).toLocaleString("ko-KR")}</td> <td className="px-2 py-2 text-center">{r.license === "creativeCommon" ? "CC" : "-"}</td> <td className="px-2 py-2 text-slate-600 max-w-[120px]"><button type="button" onClick={() => openDescriptionModal(r.description || "", r.title)} className="text-left w-full"><div className="line-clamp-2">{r.description || ""}</div></button></td> <td className="px-2 py-2"><button onClick={() => handleViewCaptions(r.id)} className="text-sky-600 hover:underline">보기</button></td> </tr>))}
+                      {!loading && tab === "channel" && sortedRows.map((r) => (<tr key={r.id} className="border-b last:border-0 hover:bg-slate-50"> <td className="px-2 py-2 text-center"><input type="checkbox" checked={selectedRows.has(r.id)} onChange={() => handleToggleRow(r.id)} /></td> <td className="px-2 py-2">{r.thumb ? <img src={r.thumb} alt="" className="w-72 aspect-video object-cover rounded" /> : "-"}</td> <td className="px-2 py-2"><a href={r.url} target="_blank" rel="noreferrer" className="text-slate-900 hover:text-sky-600 font-medium line-clamp-2 max-w-[360px]">{r.title}</a></td> <td className="px-2 py-2"><a href={r.channelId ? `https://www.youtube.com/channel/${r.channelId}` : "#"} target="_blank" rel="noreferrer" className="text-slate-700 hover:text-sky-600 truncate">{r.channelTitle}</a></td> <td className="px-2 py-2 text-center">{shortNumber(r.channelSubs)}</td> <td className="px-2 py-2 text-center">{shortNumber(r.viewCount)}</td> <td className="px-2 py-2 text-center"><button onClick={() => openCommentModal(r.id, r.title, 10)} className="text-sky-600 hover:underline">{shortNumber(r.commentCount)}</button></td> <td className="px-2 py-2 text-center">{(r.publishedAt || "").slice(0, 10)}</td> <td className="px-2 py-2 text-center">{(r.channelPublishedAt || "").slice(0, 10)}</td> <td className="px-2 py-2 text-center">{r.contributionValue != null ? r.contributionValue.toFixed(1) : "-"}</td> <td className="px-2 py-2 text-center">{r.license === "creativeCommon" ? "CC" : "-"}</td> <td className="px-2 py-2 text-slate-600 max-w-[200px]"><button type="button" onClick={() => openDescriptionModal(r.description || "", r.title)} className="text-left w-full"><div className="line-clamp-2">{r.description || ""}</div></button></td> <td className="px-2 py-2"><button onClick={() => handleViewCaptions(r.id)} className="text-sky-600 hover:underline">보기</button></td> </tr>))}
+                      {!loading && tab === "trending" && sortedRows.map((r) => (<tr key={r.id} className="border-b last:border-0 hover:bg-slate-50"> <td className="px-2 py-2 text-center"><input type="checkbox" checked={selectedRows.has(r.id)} onChange={() => handleToggleRow(r.id)} /></td> <td className="px-2 py-2">{r.thumb ? <img src={r.thumb} alt="" className="w-64 aspect-video object-cover rounded" /> : "-"}</td> <td className="px-2 py-2"><a href={r.url} target="_blank" rel="noreferrer" className="text-slate-900 hover:text-sky-600 font-medium line-clamp-2 max-w-[320px]">{r.title}</a></td> <td className="px-2 py-2 relative"><div className="relative inline-block"><button onClick={(e) => { e.stopPropagation(); setChannelMenuOpen(channelMenuOpen === r.id ? null : r.id); }} className="text-slate-700 hover:text-sky-600 truncate max-w-[120px]">{r.channelTitle}</button>{channelMenuOpen === r.id && r.channelId && (<div className="absolute left-0 top-full mt-1 bg-white border rounded-lg shadow-lg z-50 min-w-[120px]"><button onClick={(e) => { e.stopPropagation(); handleCopyChannelUrl(r.channelId); }} className="block w-full text-left px-3 py-2 text-sm hover:bg-slate-100">복사</button><button onClick={(e) => { e.stopPropagation(); handleOpenChannel(r.channelId); }} className="block w-full text-left px-3 py-2 text-sm hover:bg-slate-100">이동</button></div>)}</div></td> <td className="px-2 py-2 text-center">{shortNumber(r.subscriberCount)}</td> <td className="px-2 py-2 text-center">{shortNumber(r.viewCount)}</td> <td className="px-2 py-2 text-center"><button onClick={() => openCommentModal(r.id, r.title, 10)} className="text-sky-600 hover:underline">{shortNumber(r.commentCount)}</button></td> <td className="px-2 py-2 text-center">{(r.publishedAt || "").slice(0, 10)}</td> <td className="px-2 py-2 text-center">{(r.channelPublishedAt || "").slice(0, 10)}</td> <td className="px-2 py-2 text-center whitespace-nowrap">{Math.round(r.growthPerHour || 0).toLocaleString("ko-KR")}</td> <td className="px-2 py-2 text-center">{r.license === "creativeCommon" ? "CC" : "-"}</td> <td className="px-2 py-2 text-slate-600 max-w-[220px]"><button type="button" onClick={() => openDescriptionModal(r.description || "", r.title)} className="text-left w-full"><div className="line-clamp-2">{r.description || ""}</div></button></td> <td className="px-2 py-2"><button onClick={() => handleViewCaptions(r.id)} className="text-sky-600 hover:underline">보기</button></td> </tr>))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* 발표시간계산기 */}
+            {tab === "speech-time" && (
+              <div className="bg-white border rounded-xl overflow-hidden"><div className="flex flex-col md:flex-row min-h-[380px]"><div className="w-full md:w-72 border-b md:border-b-0 md:border-r bg-slate-50 p-4 flex flex-col gap-4"><div><div className="text-sm font-semibold">말하는 속도</div><div className="text-xs text-slate-500 mt-1">공백 포함 330자를 100% 속도로 읽으면 46초입니다. 속도를 조절해보세요.</div></div><div className="mt-2"><div className="flex justify-between text-[11px] text-slate-500 mb-1"><span>Slow (60%)</span><span>Fast (140%)</span></div><input type="range" min="60" max="140" step="10" value={speechSpeed} onChange={(e) => setSpeechSpeed(Number(e.target.value))} className="w-full" /><div className="mt-2 text-sm">현재 속도: <span className="font-semibold">{speechSpeed}%</span></div></div><div className="mt-4"><div className="text-xs text-slate-500 mb-1">예상 발표 시간</div><div className="text-2xl font-bold">{(() => { const sec = calcSpeechSeconds(speechText, speechSpeed); const m = Math.floor(sec / 60); const s = sec % 60; return m > 0 ? `${m}분 ${s}초` : `${s}초`; })()}</div></div></div><div className="flex-1 relative"><textarea className="w-full h-full min-h-[280px] p-4 outline-none resize-none text-sm" placeholder="스크립트를 입력하면 발표 시간이 계산됩니다." value={speechText} onChange={(e) => setSpeechText(e.target.value)} /><div className="absolute right-4 bottom-4 text-[11px] text-slate-600 text-right leading-4 bg-white/80 px-2 py-1 rounded-md shadow-sm">{(() => { const text = speechText || ""; const withSpaceLen = text.length; const withoutSpaceLen = text.replace(/\s/g, "").length; const getBytes = (str) => new TextEncoder().encode(str).length; const withSpaceBytes = getBytes(text); const withoutSpaceBytes = getBytes(text.replace(/\s/g, "")); const words = text.trim().length === 0 ? 0 : text.trim().split(/\s+/).length; return (<>공백 포함 : {withSpaceLen}자 / {withSpaceBytes} bytes<br />공백 미포함 : {withoutSpaceLen}자 / {withoutSpaceBytes} bytes<br />단어 수 : {words}개</>); })()}</div></div></div></div>
+            )}
+
+          </div>
+
+          {/* 모달 */}
+          {showApiModal && (<div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"><div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-5"><h2 className="text-lg font-semibold mb-2">YouTube API 키 입력</h2><p className="text-xs text-slate-500 mb-2">여러 개의 API 키를 줄바꿈 또는 콤마로 구분해서 입력하세요.</p><textarea className="w-full h-40 border rounded-lg p-2 text-sm resize-none" value={apiTextarea} onChange={(e) => setApiTextarea(e.target.value)} placeholder="AIza..." /><div className="flex justify-end gap-2 mt-3"><button onClick={() => setShowApiModal(false)} className="px-3 py-1.5 text-sm rounded-lg border">닫기</button><button onClick={() => { const count = saveKeysToStorage(apiTextarea); alert(`${count}개의 키가 저장되었습니다.`); setShowApiModal(false); }} className="px-3 py-1.5 text-sm rounded-lg bg-emerald-600 text-white">저장</button></div></div></div>)}
+          {showGeminiModal && (<div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"><div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-5"><h2 className="text-lg font-semibold mb-2">Gemini API 키 입력</h2><p className="text-xs text-slate-500 mb-2">여러 개의 Gemini API 키를 줄바꿈 또는 콤마로 구분해서 입력하세요.</p><textarea className="w-full h-40 border rounded-lg p-2 text-sm resize-none" value={geminiTextarea} onChange={(e) => setGeminiTextarea(e.target.value)} placeholder="AIza..." /><div className="flex justify-end gap-2 mt-3"><button onClick={() => setShowGeminiModal(false)} className="px-3 py-1.5 text-sm rounded-lg border">닫기</button><button onClick={() => { const count = saveGeminiKeysToStorage(geminiTextarea); alert(`${count}개의 Gemini 키가 저장되었습니다.`); setShowGeminiModal(false); }} className="px-3 py-1.5 text-sm rounded-lg bg-violet-600 text-white">저장</button></div></div></div>)}
+          {showCaptionModal && (<div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"><div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col"><div className="flex items-center justify-between px-4 py-3 border-b"><h2 className="text-base font-semibold">자막 / 분석</h2><button onClick={() => setShowCaptionModal(false)} className="text-sm text-slate-500 hover:text-slate-700">닫기</button></div><div className="flex gap-3 p-4 flex-1 overflow-hidden"><div className="flex-1 flex flex-col border rounded-xl overflow-hidden"><div className="flex items-center justify-between px-3 py-2 border-b bg-slate-50"><span className="text-xs font-medium text-slate-700">자막 원문</span><div className="flex gap-2"><button onClick={handleCopyCaptionRaw} className="px-2 py-1 text-xs rounded-lg border">자막 복사</button></div></div><div className="flex-1 overflow-auto p-3 text-xs whitespace-pre-wrap scrollbar-thin">{captionLoading ? "자막을 불러오는 중입니다..." : captionContent || "자막이 없습니다."}</div></div><div className="flex-1 flex flex-col border rounded-xl overflow-hidden"><div className="flex items-center justify-between px-3 py-2 border-b bg-slate-50"><span className="text-xs font-medium text-slate-700">자막 분석 결과 (Gemini)</span><div className="flex gap-2"><button onClick={handleAnalyzeCaption} className="px-2 py-1 text-xs rounded-lg bg-violet-600 text-white">분석하기</button><button onClick={handleCopyCaptionAnalysis} className="px-2 py-1 text-xs rounded-lg border">분석 복사</button></div></div><div className="flex-1 overflow-auto p-3 text-xs whitespace-pre-wrap scrollbar-thin">{captionAnalysisLoading ? "분석 중입니다..." : captionAnalysis || "아직 분석 결과가 없습니다."}</div></div></div></div></div>)}
+          {showCommentModal && (<div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"><div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col"><div className="flex items-center justify-between px-4 py-3 border-b"><div><h2 className="text-base font-semibold">댓글 / 분석</h2><p className="text-xs text-slate-500 line-clamp-1 max-w-[520px]">{commentVideoTitle}</p></div><button onClick={() => setShowCommentModal(false)} className="text-sm text-slate-500 hover:text-slate-700 p-2 -mr-2">닫기</button></div><div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b"><div className="flex items-center gap-2 text-xs"><span className="text-slate-600">가져올 댓글 수</span><select className="border rounded-lg px-2 py-1 text-xs" value={commentCountSel} onChange={(e) => setCommentCountSel(Number(e.target.value))}><option value={10}>10개</option><option value="20">20개</option><option value="50">50개</option><option value="100">100개</option></select></div><div className="flex gap-2"><button onClick={handleReloadComments} className="px-2 py-1 text-xs rounded-lg border">새로 불러오기</button><button onClick={handleCopyComments} className="px-2 py-1 text-xs rounded-lg border">댓글 복사</button><button onClick={handleAnalyzeComments} className="px-2 py-1 text-xs rounded-lg bg-violet-600 text-white">댓글 분석</button><button onClick={handleCopyCommentAnalysis} className="px-2 py-1 text-xs rounded-lg border">분석 복사</button></div></div><div className="flex-1 flex gap-3 p-4 overflow-hidden"><div className="flex-1 flex flex-col border rounded-xl overflow-hidden"><div className="px-3 py-2 border-b bg-slate-50 text-xs font-medium text-slate-700">댓글 목록</div><div className="flex-1 overflow-auto p-3 text-xs scrollbar-thin space-y-2">{commentLoading ? "댓글을 불러오는 중입니다..." : commentItems.length === 0 ? "댓글이 없습니다." : commentItems.map((c, idx) => (<div key={idx} className="border rounded-lg p-2 bg-slate-50/60"><div className="flex justify-between text-[11px] text-slate-500 mb-1"><span className="font-medium">{c.author}</span><span>{c.publishedAt ? c.publishedAt.slice(0, 10) : ""}</span></div><div className="text-[12px]" dangerouslySetInnerHTML={{ __html: c.text, }} />{typeof c.likeCount === "number" && (<div className="mt-1 text-[11px] text-slate-500">좋아요 {c.likeCount}</div>)}</div>))}</div></div><div className="flex-1 flex flex-col border rounded-xl overflow-hidden"><div className="px-3 py-2 border-b bg-slate-50 text-xs font-medium text-slate-700">댓글 분석 결과 (Gemini)</div><div className="flex-1 overflow-auto p-3 text-xs whitespace-pre-wrap scrollbar-thin">{commentAnalysisLoading ? "분석 중입니다..." : commentAnalysis || "아직 분석 결과가 없습니다."}</div></div></div></div></div>)}
+          {showDescModal && (<div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"><div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl max-h-[80vh] flex flex-col"><div className="flex items-center justify-between px-4 py-3 border-b"><h2 className="text-base font-semibold">{descTitle || "설명"}</h2><button onClick={() => setShowDescModal(false)} className="text-sm text-slate-500 hover:text-slate-700">닫기</button></div><div className="flex-1 overflow-auto p-4 text-sm whitespace-pre-wrap scrollbar-thin">{descContent}</div></div></div>)}
+          {showFolderSelectModal && (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60]">
+              <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-5 animate-in fade-in zoom-in duration-200">
+                <h2 className="text-lg font-semibold mb-3">저장할 폴더 선택</h2>
+                <div className="space-y-2 max-h-60 overflow-y-auto mb-4 border rounded-lg p-2">
+                  <button onClick={() => performActualSave("all")} className="w-full text-left px-3 py-2 text-sm hover:bg-slate-100 rounded-lg">기본 폴더</button>
+                  {loadSavedFolders().map(f => (
+                    <button key={f.id} onClick={() => performActualSave(f.id)} className="w-full text-left px-3 py-2 text-sm hover:bg-slate-100 rounded-lg">{f.name}</button>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => {
+                    const name = prompt("새 폴더 이름을 입력하세요.");
+                    if (name) {
+                      const folders = loadSavedFolders();
+                      const newFolder = { id: Date.now().toString(), name };
+                      saveFolders([...folders, newFolder]);
+                      setSavedModalRefresh(prev => prev + 1);
+                    }
+                  }} className="flex-1 px-3 py-1.5 text-sm rounded-lg border">새 폴더 생성</button>
+                  <button onClick={() => setShowFolderSelectModal(false)} className="px-3 py-1.5 text-sm rounded-lg border">취소</button>
+                </div>
+              </div>
+            </div>
+          )}
+          {showSavedModal && (<div key={savedModalRefresh} className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"><div className="bg-white rounded-2xl shadow-xl w-full max-w-6xl max-h-[90vh] flex flex-col"><div className="flex items-center justify-between px-4 py-3 border-b"><h2 className="text-base font-semibold">저장된 항목</h2><div className="flex gap-2"><button onClick={() => { setSavedModalType("channel"); setSelectedFolderId("all"); setSelectedSavedRows(new Set()); }} className={`px-3 py-1.5 rounded-lg text-sm ${savedModalType === "channel" ? "bg-sky-600 text-white" : "border"}`}>채널</button><button onClick={() => { setSavedModalType("video"); setSelectedFolderId("all"); setSelectedSavedRows(new Set()); }} className={`px-3 py-1.5 rounded-lg text-sm ${savedModalType === "video" ? "bg-sky-600 text-white" : "border"}`}>영상</button></div><div className="flex items-center gap-2"><button onClick={() => {
+            const allItems = savedModalType === "channel" ? loadSavedChannels() : loadSavedVideos();
+            const filtered = selectedFolderId === "all" ? allItems : (selectedFolderId === "none" ? allItems.filter(item => !item.folderId || item.folderId === "all") : allItems.filter(item => item.folderId === selectedFolderId));
+            if (savedModalType === "channel") { exportExcel("saved-channel", filtered); } else { exportExcel("saved-video", filtered); }
+          }} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white text-sm">엑셀 다운로드</button><button onClick={() => { setShowSavedModal(false); setSelectedSavedRows(new Set()); setTab("video"); }} className="text-sm text-slate-500 hover:text-slate-700 ml-2">닫기</button></div></div>
+            <div className="flex-1 flex overflow-hidden">
+              <div className="w-48 border-r bg-slate-50 p-3 space-y-2 overflow-y-auto">
+                <div className="text-xs font-bold text-slate-500 mb-2 px-2">필터</div>
+                <button onClick={() => { setSelectedFolderId("all"); setSelectedSavedRows(new Set()); }} className={`w-full text-left px-3 py-1.5 text-sm rounded-lg ${selectedFolderId === "all" ? "bg-sky-100 text-sky-700 font-semibold" : "hover:bg-slate-200"}`}>전체보기</button>
+                <button onClick={() => { setSelectedFolderId("none"); setSelectedSavedRows(new Set()); }} className={`w-full text-left px-3 py-1.5 text-sm rounded-lg ${selectedFolderId === "none" ? "bg-sky-100 text-sky-700 font-semibold" : "hover:bg-slate-200"}`}>미분류 항목</button>
+                <div className="h-px bg-slate-200 my-1"></div>
+                <div className="text-xs font-bold text-slate-500 mb-2 px-2">폴더 목록</div>
+                {loadSavedFolders().map(f => (
+                  <div key={f.id} className="group flex items-center justify-between">
+                    <button onClick={() => { setSelectedFolderId(f.id); setSelectedSavedRows(new Set()); }} className={`flex-1 text-left px-3 py-1.5 text-sm rounded-lg truncate ${selectedFolderId === f.id ? "bg-sky-100 text-sky-700 font-semibold" : "hover:bg-slate-200"}`}>{f.name}</button>
+                    <button onClick={(e) => {
+                      e.stopPropagation();
+                      if (confirm("이 폴더를 삭제할까요? 폴더 안의 항목들은 '전체보기'로 이동됩니다.")) {
+                        const folders = loadSavedFolders();
+                        saveFolders(folders.filter(x => x.id !== f.id));
+                        setSelectedFolderId("all");
+                      }
+                    }} className="hidden group-hover:block px-1 text-red-500 text-xs">삭제</button>
+                  </div>
+                ))}
+                <button onClick={() => {
+                  const name = prompt("새 폴더 이름을 입력하세요.");
+                  if (name) {
+                    const folders = loadSavedFolders();
+                    saveFolders([...folders, { id: Date.now().toString(), name }]);
+                    setSavedModalRefresh(prev => prev + 1);
+                  }
+                }} className="w-full text-left px-3 py-1.5 text-sm text-sky-600 hover:bg-sky-50 rounded-lg font-medium">+ 폴더 생성</button>
+              </div>
+              <div className="flex-1 overflow-auto p-4 flex flex-col">
+                <div className="mb-3 flex items-center justify-between">
+                  <div className="flex gap-2">
+                    {selectedSavedRows.size > 0 && (
+                      <button onClick={() => {
+                        const allItems = savedModalType === "channel" ? loadSavedChannels() : loadSavedVideos();
+                        const selected = allItems.filter(item => selectedSavedRows.has(item.id));
+                        setTargetItemsToSave(selected);
+                        setTargetSaveType(savedModalType);
+                        setShowFolderSelectModal(true);
+                      }} className="px-3 py-1.5 rounded-lg bg-sky-600 text-white text-sm">선택 항목 폴더 이동 ({selectedSavedRows.size})</button>
+                    )}
+                  </div>
+                  <div className="text-xs text-slate-400">
+                    {selectedSavedRows.size > 0 ? `${selectedSavedRows.size}개 선택됨` : ""}
+                  </div>
+                </div>
+                <div className="bg-white border rounded-xl overflow-hidden flex-1 overflow-auto">
+                  <div className="overflow-auto max-h-full">
+                    <table className="min-w-full text-sm table-fixed">
+                      <thead className="bg-slate-100 sticky top-0 z-10">{savedModalType === "channel" ? (() => {
+                        const savedChannels = loadSavedChannels();
+                        const filtered = selectedFolderId === "all" ? savedChannels : (selectedFolderId === "none" ? savedChannels.filter(c => !c.folderId || c.folderId === "all") : savedChannels.filter(c => c.folderId === selectedFolderId));
+                        return (<tr> <th className="px-2 py-2 text-center w-10"><input type="checkbox" checked={selectedSavedRows.size === filtered.length && filtered.length > 0} onChange={() => handleSelectAllSaved(filtered)} /></th> <th className="px-2 py-2 text-center w-40">프로필</th> <th className="px-2 py-2 text-center w-56">채널명</th> <th className="px-2 py-2 text-center w-28">구독자수</th> <th className="px-2 py-2 text-left w-28">채널개설일</th> <th className="px-2 py-2 text-center w-72">채널설명</th> <th className="px-2 py-2 text-center w-32">폴더</th> <th className="px-2 py-2 text-center w-24">이동</th> <th className="px-2 py-2 text-center w-20">삭제</th> </tr>);
+                      })() : (() => {
+                        const savedVideos = loadSavedVideos();
+                        const filtered = selectedFolderId === "all" ? savedVideos : (selectedFolderId === "none" ? savedVideos.filter(v => !v.folderId || v.folderId === "all") : savedVideos.filter(v => v.folderId === selectedFolderId));
+                        return (<tr> <th className="px-2 py-2 text-center w-10"><input type="checkbox" checked={selectedSavedRows.size === filtered.length && filtered.length > 0} onChange={() => handleSelectAllSaved(filtered)} /></th> <th className="px-2 py-2 text-center w-60">썸네일</th> <th className="px-2 py-2 text-center w-48">제목</th> <th className="px-2 py-2 text-center w-36">채널</th> <th className="px-2 py-2 text-center w-24">조회수</th> <th className="px-2 py-2 text-center w-20">길이(초)</th> <th className="px-2 py-2 text-center w-24">게시일</th> <th className="px-2 py-2 text-center w-32">폴더</th> <th className="px-2 py-2 text-center w-24">이동</th> <th className="px-2 py-2 text-center w-20">삭제</th> </tr>);
+                      })()}</thead>
+                      <tbody>{savedModalType === "channel" ? (() => {
+                        const savedChannels = loadSavedChannels();
+                        const foldersMap = Object.fromEntries(loadSavedFolders().map(f => [f.id, f.name]));
+                        const filtered = selectedFolderId === "all" ? savedChannels : (selectedFolderId === "none" ? savedChannels.filter(c => !c.folderId || c.folderId === "all") : savedChannels.filter(c => c.folderId === selectedFolderId));
+                        return filtered.length === 0 ? (<tr><td colSpan="9" className="text-center py-10 text-slate-400">항목이 없습니다.</td></tr>) : filtered.map((c) => (<tr key={c.id} className="border-b last:border-0 hover:bg-slate-50"> <td className="px-2 py-2 text-center"><input type="checkbox" checked={selectedSavedRows.has(c.id)} onChange={() => handleToggleSavedRow(c.id)} /></td> <td className="px-2 py-2">{c.profileThumb ? <img src={c.profileThumb} alt="" className="w-40 h-40 object-cover rounded" /> : "-"}</td> <td className="px-2 py-2"><a href={`https://www.youtube.com/channel/${c.id}`} target="_blank" rel="noreferrer" className="text-slate-900 hover:text-sky-600 font-medium">{c.channelTitle}</a></td> <td className="px-2 py-2 text-center">{shortNumber(c.subscriberCount)}</td> <td className="px-2 py-2">{(c.channelPublishedAt || "").slice(0, 10)}</td> <td className="px-2 py-2 text-slate-600"><button type="button" onClick={() => openDescriptionModal(c.description || "", c.channelTitle)} className="text-left w-full"><div className="line-clamp-2 max-w-[360px]">{c.description || ""}</div></button></td> <td className="px-2 py-2 text-center text-[11px] text-slate-500 font-medium">{foldersMap[c.folderId] || "미분류"}</td>
+                          <td className="px-2 py-2 text-center"><button onClick={() => {
+                            setTargetItemsToSave([c]);
+                            setTargetSaveType("channel");
+                            setShowFolderSelectModal(true);
+                          }} className="text-xs text-sky-600 hover:underline">폴더변경</button></td>
+                          <td className="px-2 py-2 text-center"><button onClick={() => { handleDeleteSavedChannel(c.id); }} className="px-2 py-1 text-xs rounded-lg bg-red-500 text-white hover:bg-red-600">삭제</button></td> </tr>));
+                      })() : (() => {
+                        const savedVideos = loadSavedVideos();
+                        const foldersMap = Object.fromEntries(loadSavedFolders().map(f => [f.id, f.name]));
+                        const filtered = selectedFolderId === "all" ? savedVideos : (selectedFolderId === "none" ? savedVideos.filter(v => !v.folderId || v.folderId === "all") : savedVideos.filter(v => v.folderId === selectedFolderId));
+                        return filtered.length === 0 ? (<tr><td colSpan="10" className="text-center py-10 text-slate-400">항목이 없습니다.</td></tr>) : filtered.map((v) => (<tr key={v.id} className="border-b last:border-0 hover:bg-slate-50"> <td className="px-2 py-2 text-center"><input type="checkbox" checked={selectedSavedRows.has(v.id)} onChange={() => handleToggleSavedRow(v.id)} /></td> <td className="px-2 py-2">{v.thumb ? <div className="w-[200px] aspect-video bg-slate-100 rounded overflow-hidden"><img src={v.thumb} alt="" className="w-full h-full object-cover" /></div> : "-"}</td> <td className="px-2 py-2"><a href={v.url} target="_blank" rel="noreferrer" className="text-slate-900 hover:text-sky-600 font-medium line-clamp-2 max-w-[180px]">{v.title}</a></td> <td className="px-2 py-2"><a href={v.channelId ? `https://www.youtube.com/channel/${v.channelId}` : "#"} target="_blank" rel="noreferrer" className="text-slate-700 hover:text-sky-600 truncate max-w-[140px]">{v.channelTitle}</a></td> <td className="px-2 py-2 text-center">{shortNumber(v.viewCount)}</td> <td className="px-2 py-2 text-center">{v.durationSec || "-"}</td> <td className="px-2 py-2">{(v.publishedAt || "").slice(0, 10)}</td> <td className="px-2 py-2 text-center text-[11px] text-slate-500 font-medium">{foldersMap[v.folderId] || "미분류"}</td>
+                          <td className="px-2 py-2 text-center"><button onClick={() => {
+                            setTargetItemsToSave([v]);
+                            setTargetSaveType("video");
+                            setShowFolderSelectModal(true);
+                          }} className="text-xs text-sky-600 hover:underline">폴더변경</button></td>
+                          <td className="px-2 py-2 text-center"><button onClick={() => { handleDeleteSavedVideo(v.id); }} className="px-2 py-1 text-xs rounded-lg bg-red-500 text-white hover:bg-red-600">삭제</button></td> </tr>));
+                      })()}</tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div></div>)}
+
+          {/* 커피 후원 모달 */}
+          {showCoffeeModal && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100] p-4" onClick={() => setShowCoffeeModal(false)}>
+              <div className="bg-white rounded-3xl shadow-2xl overflow-hidden max-w-sm w-full animate-in fade-in zoom-in duration-300" onClick={e => e.stopPropagation()}>
+                <div className="relative">
+                  <img src="https://store.img11.co.kr/70064898/e9459abf-7937-4289-b479-f8cb197cb71b_1772709289557.png" alt="Coffee Support" className="w-full h-auto" />
+                  <button onClick={() => setShowCoffeeModal(false)} className="absolute top-4 right-4 w-10 h-10 bg-white/80 backdrop-blur rounded-full flex items-center justify-center text-slate-800 hover:bg-white transition-all shadow-lg">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+                <div className="p-6 text-center">
+                  <h3 className="text-xl font-bold text-slate-800 mb-2">커피 한 잔의 응원 🥤</h3>
+                  <p className="text-slate-600 text-sm leading-relaxed">
+                    더 나은 프로그램 개발을 위해 큰 힘이 됩니다!<br />항상 이용해주셔서 감사합니다.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+
+</html>
