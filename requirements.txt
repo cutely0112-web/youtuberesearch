@@ -1,6 +1,6 @@
 flask
 flask-cors
-yt-dlp
+yt-dlp==2024.12.06
 youtube-transcript-api
 gunicorn
 gevent

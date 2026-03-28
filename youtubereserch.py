@@ -63,11 +63,15 @@ def build_subtitle_opts(embed_into_video: bool):
         return { "writesubtitles": True, "writeautomaticsub": True, "subtitlesformat": "best", "postprocessors": [{"key": "FFmpegEmbedSubtitle"}] }
     return { "writesubtitles": True, "writeautomaticsub": True, "skip_download": True, "subtitlesformat": "vtt" }
 
-# yt-dlp 내부 로거 오류 방지용 클래스
+# yt-dlp 내부 로거 오류 방지 및 모든 호출 대응 클래스
 class YdlLogger:
     def debug(self, msg): pass
+    def info(self, msg): pass
     def warning(self, msg): pass
     def error(self, msg): print(f"[YT-DLP ERROR] {msg}")
+    def __getattr__(self, name):
+        # 정의되지 않은 메서드 호출 시 아무것도 하지 않는 함수 반환 (NoneType 오류 방지)
+        return lambda *args, **kwargs: None
 
 def make_ydl_opts_base(save_dir: Path):
     opts = {
@@ -79,8 +83,10 @@ def make_ydl_opts_base(save_dir: Path):
         "ignoreerrors": False,
         "nocheckcertificate": True,
         "logger": YdlLogger(),
+        "writexattrs": False,      # 서버 환경 대다수에서 지원하지 않으므로 비활성화
+        "no_color": True,          # 로그에 특수 문자 포함 방지
         "concurrent_fragment_downloads": 3,
-        "format": "bv*+ba/b",
+        "format": "best[ext=mp4]/best", # 서버 환경에서 가장 안정적인 단일 파일 형식 우선
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
         "referer": "https://www.google.com/",
     }
