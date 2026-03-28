@@ -693,8 +693,8 @@
                   e.preventDefault();
                   e.currentTarget.classList.remove('bg-sky-50');
                   const file = e.dataTransfer.files[0];
-                  if (file && file.type.startsWith('video/')) setConvertFile(file);
-                  else alert('영상 파일만 업로드 가능합니다.');
+                  if (file && (file.type.startsWith('video/') || file.type.startsWith('audio/'))) setConvertFile(file);
+                  else alert('영상 또는 음성 파일만 업로드 가능합니다.');
                 }}
               >
                 <div className="w-20 h-20 bg-sky-100 rounded-full flex items-center justify-center text-sky-600 mb-2">
@@ -703,10 +703,10 @@
                   </svg>
                 </div>
                 <div className="text-center">
-                  <p className="text-lg font-semibold text-slate-800">영상 파일을 드래그하거나 클릭하여 업로드</p>
-                  <p className="text-sm text-slate-500 mt-1">MP4, MKV, AVI, MOV 등 지원 (최대 500MB)</p>
+                  <p className="text-lg font-semibold text-slate-800">영상 또는 음성 파일을 드래그하거나 클릭하여 업로드</p>
+                  <p className="text-sm text-slate-500 mt-1">MP4, MKV, WAV, M4A 등 다양한 형식 지원 (최대 500MB)</p>
                 </div>
-                <input type="file" id="fileUpload" className="hidden" accept="video/*" onChange={(e) => setConvertFile(e.target.files[0])} />
+                <input type="file" id="fileUpload" className="hidden" accept="video/*,audio/*" onChange={(e) => setConvertFile(e.target.files[0])} />
                 <label htmlFor="fileUpload" className="px-6 py-2.5 bg-white border-2 border-sky-600 text-sky-600 rounded-xl font-semibold cursor-pointer hover:bg-sky-50 transition-colors">파일 선택</label>
                 
                 {convertFile && (

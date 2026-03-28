@@ -211,8 +211,8 @@ def convert_mp4_to_mp3():
     import subprocess
     
     ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in ('.mp4', '.mkv', '.avi', '.mov', '.flv'):
-         return jsonify({"error": "지원하지 않는 영상 형식입니다."}), 400
+    if ext not in ('.mp4', '.mkv', '.avi', '.mov', '.flv', '.wav', '.m4a', '.aac', '.ogg'):
+         return jsonify({"error": "지원하지 않는 영상/음성 형식입니다."}), 400
 
     temp_id = str(uuid.uuid4())
     input_path = DEFAULT_DOWNLOAD_DIR / f"{temp_id}_input{ext}"
