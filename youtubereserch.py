@@ -294,7 +294,11 @@ def not_found_error(error):
 
 @app.route("/")
 def index_page():
-    return send_from_directory(BASE_DIR, 'index.html')
+    # 현재 디렉토리에서 index.html 존재 여부 확인 후 서빙
+    html_path = BASE_DIR / "index.html"
+    if html_path.exists():
+        return send_from_directory(str(BASE_DIR), "index.html")
+    return jsonify({"error": "index.html 파일을 찾을 수 없습니다. 현재 경로: " + str(BASE_DIR)}), 404
 
 @app.route("/download_file/<path:filename>")
 def download_file_to_user(filename):
