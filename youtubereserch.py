@@ -57,17 +57,16 @@ def build_subtitle_opts(embed_into_video: bool):
 
 def make_ydl_opts_base(save_dir: Path):
     return {
-        # "outtmpl": str(save_dir / "%(title)s.%(ext)s"),  #  제목에 ?, |, : 들어가면 깨질 수 있음
-        "outtmpl": str(save_dir / "%(id)s.%(ext)s"),       #  안전한 ID 기반 파일명
+        "outtmpl": str(save_dir / "%(id)s.%(ext)s"),
         "quiet": False,
         "verbose": True,
         "noprogress": False,
-        "ignoreerrors": True,
+        "ignoreerrors": False, # 에러 발생 시 None 반환 방지
         "nocheckcertificate": True,
         "concurrent_fragment_downloads": 3,
         "format": "bv*+ba/b",
-        "js_runtimes": {"node": {}},
-        "remote_components": ["ejs:github"]
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "referer": "https://www.google.com/",
     }
 
 @app.route("/download", methods=["POST"])
