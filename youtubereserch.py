@@ -16,6 +16,7 @@ from flask_cors import CORS
 
 import yt_dlp
 import subprocess
+import tempfile
 
 # 2. Flask 앱 초기화
 app = Flask(__name__)
@@ -209,9 +210,12 @@ def clean_vtt_text(vtt_text: str) -> list[str]:
 def extract_transcript_with_ytdlp(video_id: str) -> list[str]:
     """yt-dlp를 사용하여 자막 파일 직접 다운로드 및 파싱 (최종 백업)"""
     url = f"https://www.youtube.com/watch?v={video_id}"
-    temp_prefix = str(DEFAULT_DOWNLOAD_DIR / f"sub_{video_id}")
     
-    ydl_opts = make_ydl_opts_base(DEFAULT_DOWNLOAD_DIR)
+    # 서버 환경(Render/Docker)에서 권한 문제를 피하기 위해 시스템 임시 폴더 사용
+    temp_dir = Path(tempfile.gettempdir())
+    temp_prefix = str(temp_dir / f"sub_{video_id}")
+    
+    ydl_opts = make_ydl_opts_base(temp_dir) # 임시 폴더를 작업 디렉토리로 전달
     ydl_opts.update({
         "skip_download": True,
         "writesubtitles": True,
@@ -364,6 +368,21 @@ def index_page():
 def download_file_to_user(filename):
     """서버에 저장된 파일을 사용자 PC로 전송 (자동 다운로드용)"""
     return send_from_directory(DEFAULT_DOWNLOAD_DIR, filename, as_attachment=True)
+
+# --- 8. 전역 에러 핸들러 (JSON 응답 보장) ---
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """서버의 모든 에러를 JSON으로 반환하여 프론트엔드 깨짐 방지"""
+    app.logger.error(f"전역 예외 발생: {str(e)}\n{traceback.format_exc()}")
+    response = {
+        "error": f"서버 내부 오류가 발생했습니다: {str(e)}",
+        "status": "error"
+    }
+    return jsonify(response), 500
+
+@app.errorhandler(404)
+def resource_not_found(e):
+    return jsonify(error="요청하신 경로를 찾을 수 없습니다."), 404
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=8000, debug=False, use_reloader=False)
