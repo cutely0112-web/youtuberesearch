@@ -153,10 +153,28 @@ def api_transcript():
         return jsonify({"error": "자막 추출 라이브러리(youtube_transcript_api)가 설치되지 않았습니다."}), 500
 
     try:
-        # 자막 목록을 먼저 가져오고 가장 적합한 자막(ko, en)을 선택
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        transcript = transcript_list.find_transcript(['ko', 'en'])
-        transcript_data = transcript.fetch()
+        # 버전 및 라이브러리 상태에 따라 메서드 이름이 다를 수 있으므로 체크
+        if hasattr(YouTubeTranscriptApi, 'list_transcripts'):
+            # 1. 자막 목록을 가져와서 적합한 언어 선택 (권장 방식)
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript = transcript_list.find_transcript(['ko', 'en'])
+            transcript_data = transcript.fetch()
+        elif hasattr(YouTubeTranscriptApi, 'get_transcript'):
+            # 2. 직접 get_transcript 호출 (구버전 방식)
+            transcript_data = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko', 'en'])
+        else:
+            # 3. 최후의 수단으로 모듈 자체에서 찾아보기
+            import youtube_transcript_api
+            if hasattr(youtube_transcript_api, 'YouTubeTranscriptApi'):
+                api_class = youtube_transcript_api.YouTubeTranscriptApi
+                if hasattr(api_class, 'list_transcripts'):
+                    transcript_list = api_class.list_transcripts(video_id)
+                    transcript = transcript_list.find_transcript(['ko', 'en'])
+                    transcript_data = transcript.fetch()
+                else:
+                    transcript_data = api_class.get_transcript(video_id, languages=['ko', 'en'])
+            else:
+                raise AttributeError("YouTubeTranscriptApi 클래스 또는 메서드를 찾을 수 없습니다.")
         
         # 데이터는 딕셔너리 리스트이므로 snippet['text'] 로 접근
         lines = [snippet['text'].strip() for snippet in transcript_data if snippet.get('text', '').strip()]
@@ -168,23 +186,17 @@ def api_transcript():
 
     except NoTranscriptFound:
         try:
-            # 위에서 이미 transcript_list를 가져왔을 수 있으므로 재사용하거나 새로 가져옴
-            try:
-                if 'transcript_list' not in locals():
-                    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            except:
-                return jsonify({"error": "이 영상에는 자막이 없습니다."}), 404
-
+            # 한국어 자막이 없을 경우 자동 번역 시도
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             for transcript in transcript_list:
                 if transcript.is_translatable:
                     translated_transcript = transcript.translate('ko').fetch()
                     lines = [snippet['text'].strip() for snippet in translated_transcript if snippet.get('text', '').strip()]
                     return jsonify({"lines": lines})
             
-            # 번역할 자막조차 없는 최종적인 경우
             return jsonify({"error": "이 영상에는 한국어로 보거나 번역할 수 있는 자막이 없습니다."}), 404
-        except Exception as e_trans:
-            return jsonify({"error": f"자막 번역 중 오류가 발생했습니다: {e_trans}"}), 500
+        except Exception:
+            return jsonify({"error": "이 영상에는 자막이 없습니다."}), 404
             
     except TranscriptsDisabled:
         return jsonify({"error": "이 영상은 자막 기능이 비활성화되어 있습니다."}), 403
