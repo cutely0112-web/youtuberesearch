@@ -90,12 +90,13 @@ def make_ydl_opts_base(save_dir: Path):
         "no_color": True,
         "concurrent_fragment_downloads": 3,
         "format": "best[ext=mp4]/best",
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        # 최신 iPhone 15/Safari 환경으로 User-Agent 변경 (유튜브 감시망 우회)
+        "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
         "referer": "https://www.google.com/",
-        # 유튜브 봇 감지 우회 옵션 강화
+        # 유튜브 봇 감지 우회 옵션 (모바일 앱 전용 모드 강제)
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios", "web", "mweb"],
+                "player_client": ["ios", "android"],  # 차단의 주원인인 web, mweb 제거
                 "player_skip_subscribe_check": True,
             }
         },
