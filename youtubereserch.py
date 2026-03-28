@@ -156,6 +156,68 @@ def extract_video_id(url: str) -> str | None:
     if len(url) == 11 and re.match(r'^[0-9A-Za-z_-]{11}$', url): return url
     return None
 
+def clean_vtt_text(vtt_text: str) -> list[str]:
+    """VTT 자막 파일에서 타임스탬프와 태그를 제거하고 순수 텍스트만 추출"""
+    lines = []
+    # 시간 정보 및 불필요한 헤더/태그 제거 정규식
+    time_pattern = re.compile(r'\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}')
+    tag_pattern = re.compile(r'<[^>]+>')
+    
+    for line in vtt_text.splitlines():
+        line = line.strip()
+        # VTT 헤더, 시간 정보, 빈 줄 제외
+        if not line or line == "WEBVTT" or line.startswith("Kind:") or line.startswith("Language:") or time_pattern.match(line):
+            continue
+        
+        # HTML 스타일 태그 제거
+        clean_line = tag_pattern.sub('', line).strip()
+        if clean_line and clean_line not in lines: # 중복 라인 방지
+            lines.append(clean_line)
+    return lines
+
+def extract_transcript_with_ytdlp(video_id: str) -> list[str]:
+    """yt-dlp를 사용하여 자막 파일 직접 다운로드 및 파싱 (최종 백업)"""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    temp_prefix = str(DEFAULT_DOWNLOAD_DIR / f"sub_{video_id}")
+    
+    ydl_opts = make_ydl_opts_base(DEFAULT_DOWNLOAD_DIR)
+    ydl_opts.update({
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["ko", "en"], # 한국어 우선, 없으면 영어
+        "subtitlesformat": "vtt",
+        "outtmpl": temp_prefix,
+        "quiet": True,
+    })
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        
+        # 생성된 자막 파일(vtt) 탐색
+        vtt_path = None
+        for ext in [".ko.vtt", ".en.vtt", ".ko.auto.vtt", ".en.auto.vtt"]:
+            test_path = Path(f"{temp_prefix}{ext}")
+            if test_path.exists():
+                vtt_path = test_path
+                break
+        
+        if not vtt_path:
+            return []
+            
+        with open(vtt_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            
+        # 임시 자막 파일 삭제
+        if vtt_path.exists():
+            os.remove(vtt_path)
+            
+        return clean_vtt_text(content)
+    except Exception as e:
+        print(f"[Transcript Backup] yt-dlp 추출 에러: {e}")
+        return []
+
 @app.route("/transcript")
 def api_transcript():
     video_url_or_id = request.args.get("video", "").strip()
@@ -217,8 +279,17 @@ def api_transcript():
         return jsonify({"error": "이 영상은 자막 기능이 비활성화되어 있습니다."}), 403
 
     except Exception as e:
-        app.logger.error(f"자막 처리 중 알 수 없는 오류 ({video_id}): {traceback.format_exc()}")
-        return jsonify({"error": f"자막 처리 중 예상치 못한 오류 발생: {e}"}), 500
+        # --- 최종 단계: 모든 라이브러리 방식 실패 시 yt-dlp 기반 백업 로직 실행 ---
+        print(f"[Transcript] 기존 라이브러리 방식 실패 ({video_id}), yt-dlp 백업 모드 실행...")
+        try:
+            backup_lines = extract_transcript_with_ytdlp(video_id)
+            if backup_lines:
+                return jsonify({"lines": backup_lines})
+        except Exception as eb:
+            print(f"[Transcript] 백업 모드조차 실패: {eb}")
+
+        app.logger.error(f"자막 처리 최종 실패 ({video_id}): {traceback.format_exc()}")
+        return jsonify({"error": f"자막을 가져오지 못했습니다: 자막 처리 중 예상치 못한 오류 발생: {e}"}), 500
 
 
 # --- 6. MP4 to MP3 변환 기능 ---
