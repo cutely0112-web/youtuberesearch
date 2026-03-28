@@ -22,12 +22,6 @@ try:
 except ImportError:
     YouTubeTranscriptApi = None
 
-try:
-    import imageio_ffmpeg
-    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
-except ImportError:
-    FFMPEG_PATH = "ffmpeg" # 기본 시스템 경로 기대
-
 # 2. Flask 앱 초기화
 app = Flask(__name__)
 CORS(app)
@@ -50,10 +44,9 @@ DEFAULT_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # 디버그용으로 한 번 찍어보면 좋음
 print("========================================")
-print("[TubeResearch] 서버 시작 업데이트 버전 v1.0.2")
+print("[TubeResearch] 서버 시작 업데이트 버전 v1.0.3 (Docker)")
 print(f"[TubeResearch] BASE_DIR = {BASE_DIR}")
 print(f"[TubeResearch] DOWNLOAD_DIR = {DEFAULT_DOWNLOAD_DIR}")
-print(f"[TubeResearch] FFmpeg PATH = {FFMPEG_PATH}")
 print("========================================")
 
 # --- 4. 영상 다운로드 기능 (정상 동작하므로 변경 없음) ---
@@ -74,7 +67,7 @@ class YdlLogger:
         return lambda *args, **kwargs: None
 
 def make_ydl_opts_base(save_dir: Path):
-    opts = {
+    return {
         "outtmpl": str(save_dir / "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
@@ -83,17 +76,13 @@ def make_ydl_opts_base(save_dir: Path):
         "ignoreerrors": False,
         "nocheckcertificate": True,
         "logger": YdlLogger(),
-        "writexattrs": False,      # 서버 환경 대다수에서 지원하지 않으므로 비활성화
-        "no_color": True,          # 로그에 특수 문자 포함 방지
+        "writexattrs": False,
+        "no_color": True,
         "concurrent_fragment_downloads": 3,
-        "format": "best[ext=mp4]/best", # 서버 환경에서 가장 안정적인 단일 파일 형식 우선
+        "format": "best[ext=mp4]/best",
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
         "referer": "https://www.google.com/",
     }
-    # FFmpeg 경로 명시적 지정 (배포 환경 오류 방지)
-    if FFMPEG_PATH:
-        opts["ffmpeg_location"] = FFMPEG_PATH
-    return opts
 
 @app.route("/download", methods=["POST"])
 def api_download_stream():
